@@ -1,0 +1,7 @@
+outputs/
+results/
+*.png
+wandb/
+*.jpg
+*.pt
+data/
