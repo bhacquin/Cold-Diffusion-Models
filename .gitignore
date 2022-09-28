@@ -6,3 +6,4 @@ wandb/
 *.pt
 data/
 runs/
+root*
