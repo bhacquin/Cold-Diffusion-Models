@@ -1,0 +1,8 @@
+defaults:
+  - base_dataset
+
+name: extra
+path_prefix: ~/data/extra
+high_quality_path: ${path_prefix}
+low_quality_path: ${path_prefix}/lq
+collated_path: ${path_prefix}/${name}_collated.csv

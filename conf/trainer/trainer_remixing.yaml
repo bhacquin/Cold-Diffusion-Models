@@ -1,0 +1,51 @@
+name: base_trainer
+type: dummy
+platform: local
+
+#### Trainer params
+
+folder1: 
+folder2: 
+ema_decay: 0.995
+image_size: 128
+train_batch_size: 32
+train_lr: 2e-5
+train_num_steps: 700000
+gradient_accumulate_every: 2
+fp16: false
+step_start_ema: 2000
+update_ema_every: 10
+save_and_sample_every: 1000
+results_folder: './results'
+load_path: 
+dataset: 
+shuffle: true
+
+#### Diffusion params
+diffusion:
+  image_size: 128
+  channels: 3
+  timesteps: 50   # number of steps
+  loss_type: 'l1'                  # L1 or L2
+  train_routine: 'Final'
+  sampling_routine: 'default'
+
+
+
+#### Model params
+model:
+  residual: false
+  with_time_emb: false
+
+
+
+# Mode slurm
+slurm:
+  nodes: 1 # 2
+  gpus_per_node: 1  # max 2
+  cpus_per_task: 10
+  mem: 0 # in GiB 48
+  timeout: 48 # hours
+  partition: gpu
+  qos: gpu
+  account: vita # optional

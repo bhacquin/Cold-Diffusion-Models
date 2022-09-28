@@ -5,3 +5,4 @@ wandb/
 *.jpg
 *.pt
 data/
+runs/

@@ -1,0 +1,60 @@
+name: blur_diffusion
+platform: local
+
+log_level: INFO
+results_folder: ./results
+checkpointpath: 
+seed: 42
+#### Tracker
+use_clearml: false 
+use_wandb: true
+wandb_entity: bastienvd
+ml_exp_name: Diffusion_Blur
+
+
+#### Trainer params
+ema_decay: 0.995
+image_size: 128
+train_batch_size: 32
+lr: 2e-5
+train_num_steps: 700000
+gradient_accumulate_every: 1
+fp16: false
+step_start_ema: 2000
+update_ema_every: 10
+save_and_sample_every: 500 
+
+#### Diffusion params
+diffusion:
+  type: deblur
+  device_of_kernel: cuda
+  image_size: 128
+  channels: 3
+  timesteps: 1000   # number of steps
+  loss_type: l1
+  kernel_std: 0.15
+  kernel_size: 3
+  blur_routine: Incremental             
+  train_routine: Final
+  sampling_routine: x0_step_down
+  discrete: false
+
+#### Model params
+model:
+  residual: false
+  with_time_emb: false
+  dim_mults: [1, 2, 4, 8]
+  dim: 64
+  out_dim: 
+  channels: 3
+
+# Mode slurm
+slurm:
+  nodes: 1 # 2
+  gpus_per_node: 1  # max 2
+  cpus_per_task: 10
+  mem: 0 # in GiB 48
+  timeout: 48 # hours
+  partition: gpu
+  qos: gpu
+  account: vita # optional
