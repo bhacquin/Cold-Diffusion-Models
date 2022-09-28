@@ -7,3 +7,7 @@ wandb/
 data/
 runs/
 root*
+train.log
+.hydra
+.idea
+__pycache__
