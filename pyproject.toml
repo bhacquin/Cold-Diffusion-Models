@@ -23,6 +23,8 @@ tensorboard = "^2.10.1"
 pytorch-msssim = "^0.2.1"
 clearml = "^1.7.0"
 wandb = "^0.13.3"
+opencv-python = "^4.6.0.66"
+imageio = "^2.22.0"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
@@ -43,3 +45,4 @@ isort = "isort ."
 check = ['isort', 'black']
 
 deblur-local = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m train dataset=dataset_celebA128 trainer=trainer_blur"
+defade-local = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m train dataset=dataset_celebA128 trainer=trainer_defading"

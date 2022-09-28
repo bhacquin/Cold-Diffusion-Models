@@ -10,6 +10,8 @@ from torch.utils import data
 from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms, utils
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DistributedSampler
 
 from einops import rearrange
 
@@ -31,306 +33,298 @@ try:
 except:
     APEX_AVAILABLE = False
 
+from utils_metrics.utils import exists, default, cycle, cycle_cat, num_to_groups, loss_backwards, extract, noise_like, cosine_beta_schedule
+from models.Unet import Unet, EMA
 
-def exists(x):
-    return x is not None
-
-
-def default(val, d):
-    if exists(val):
-        return val
-    return d() if isfunction(d) else d
+# def exists(x):
+#     return x is not None
 
 
-def create_folder(path):
-    try:
-        os.mkdir(path)
-    except OSError as exc:
-        if exc.errno != errno.EEXIST:
-            raise
-        pass
+# def default(val, d):
+#     if exists(val):
+#         return val
+#     return d() if isfunction(d) else d
 
 
-def cycle(dl):
-    while True:
-        for inputs in dl:
-            yield inputs
+# def create_folder(path):
+#     try:
+#         os.mkdir(path)
+#     except OSError as exc:
+#         if exc.errno != errno.EEXIST:
+#             raise
+#         pass
 
 
-def num_to_groups(num, divisor):
-    groups = num // divisor
-    remainder = num % divisor
-    arr = [divisor] * groups
-    if remainder > 0:
-        arr.append(remainder)
-    return arr
+# def cycle(dl):
+#     while True:
+#         for inputs in dl:
+#             yield inputs
 
 
-def loss_backwards(fp16, loss, optimizer, **kwargs):
-    if fp16:
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-            scaled_loss.backward(**kwargs)
-    else:
-        loss.backward(**kwargs)
+# def num_to_groups(num, divisor):
+#     groups = num // divisor
+#     remainder = num % divisor
+#     arr = [divisor] * groups
+#     if remainder > 0:
+#         arr.append(remainder)
+#     return arr
 
 
-class EMA:
-    def __init__(self, beta):
-        super().__init__()
-        self.beta = beta
-
-    def update_model_average(self, ma_model, current_model):
-        for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
-            old_weight, up_weight = ma_params.data, current_params.data
-            ma_params.data = self.update_average(old_weight, up_weight)
-
-    def update_average(self, old, new):
-        if old is None:
-            return new
-        return old * self.beta + (1 - self.beta) * new
+# def loss_backwards(fp16, loss, optimizer, **kwargs):
+#     if fp16:
+#         with amp.scale_loss(loss, optimizer) as scaled_loss:
+#             scaled_loss.backward(**kwargs)
+#     else:
+#         loss.backward(**kwargs)
 
 
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
+# class EMA:
+#     def __init__(self, beta):
+#         super().__init__()
+#         self.beta = beta
 
-    def forward(self, x, *args, **kwargs):
-        return self.fn(x, *args, **kwargs) + x
+#     def update_model_average(self, ma_model, current_model):
+#         for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
+#             old_weight, up_weight = ma_params.data, current_params.data
+#             ma_params.data = self.update_average(old_weight, up_weight)
 
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+#     def update_average(self, old, new):
+#         if old is None:
+#             return new
+#         return old * self.beta + (1 - self.beta) * new
 
 
-def Upsample(dim):
-    return nn.ConvTranspose2d(dim, dim, 4, 2, 1)
+# class Residual(nn.Module):
+#     def __init__(self, fn):
+#         super().__init__()
+#         self.fn = fn
+
+#     def forward(self, x, *args, **kwargs):
+#         return self.fn(x, *args, **kwargs) + x
 
 
-def Downsample(dim):
-    return nn.Conv2d(dim, dim, 4, 2, 1)
+# class SinusoidalPosEmb(nn.Module):
+#     def __init__(self, dim):
+#         super().__init__()
+#         self.dim = dim
+
+#     def forward(self, x):
+#         device = x.device
+#         half_dim = self.dim // 2
+#         emb = math.log(10000) / (half_dim - 1)
+#         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+#         emb = x[:, None] * emb[None, :]
+#         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+#         return emb
 
 
-class LayerNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
-        self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
-
-    def forward(self, x):
-        var = torch.var(x, dim=1, unbiased=False, keepdim=True)
-        mean = torch.mean(x, dim=1, keepdim=True)
-        return (x - mean) / (var + self.eps).sqrt() * self.g + self.b
+# def Upsample(dim):
+#     return nn.ConvTranspose2d(dim, dim, 4, 2, 1)
 
 
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.fn = fn
-        self.norm = LayerNorm(dim)
-
-    def forward(self, x):
-        x = self.norm(x)
-        return self.fn(x)
+# def Downsample(dim):
+#     return nn.Conv2d(dim, dim, 4, 2, 1)
 
 
-class ConvNextBlock(nn.Module):
-    """ https://arxiv.org/abs/2201.03545 """
+# class LayerNorm(nn.Module):
+#     def __init__(self, dim, eps=1e-5):
+#         super().__init__()
+#         self.eps = eps
+#         self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+#         self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
 
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.GELU(),
-            nn.Linear(time_emb_dim, dim)
-        ) if exists(time_emb_dim) else None
-
-        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
-
-        self.net = nn.Sequential(
-            LayerNorm(dim) if norm else nn.Identity(),
-            nn.Conv2d(dim, dim_out * mult, 3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1)
-        )
-
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
-
-    def forward(self, x, time_emb=None):
-        h = self.ds_conv(x)
-
-        if exists(self.mlp):
-            assert exists(time_emb), 'time emb must be passed in'
-            condition = self.mlp(time_emb)
-            h = h + rearrange(condition, 'b c -> b c 1 1')
-
-        h = self.net(h)
-        return h + self.res_conv(x)
+#     def forward(self, x):
+#         var = torch.var(x, dim=1, unbiased=False, keepdim=True)
+#         mean = torch.mean(x, dim=1, keepdim=True)
+#         return (x - mean) / (var + self.eps).sqrt() * self.g + self.b
 
 
-class LinearAttention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
-        super().__init__()
-        self.scale = dim_head ** -0.5
-        self.heads = heads
-        hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+# class PreNorm(nn.Module):
+#     def __init__(self, dim, fn):
+#         super().__init__()
+#         self.fn = fn
+#         self.norm = LayerNorm(dim)
 
-    def forward(self, x):
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h=self.heads), qkv)
-        q = q * self.scale
-
-        k = k.softmax(dim=-1)
-        context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
-
-        out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
-        out = rearrange(out, 'b h c (x y) -> b (h c) x y', h=self.heads, x=h, y=w)
-        return self.to_out(out)
+#     def forward(self, x):
+#         x = self.norm(x)
+#         return self.fn(x)
 
 
-class Unet(nn.Module):
-    def __init__(
-            self,
-            dim,
-            out_dim=None,
-            dim_mults=(1, 2, 4, 8),
-            channels=3,
-            with_time_emb=True,
-            residual=False
-    ):
-        super().__init__()
-        self.channels = channels
-        self.residual = residual
+# class ConvNextBlock(nn.Module):
+#     """ https://arxiv.org/abs/2201.03545 """
 
-        dims = [channels, *map(lambda m: dim * m, dim_mults)]
-        in_out = list(zip(dims[:-1], dims[1:]))
+#     def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
+#         super().__init__()
+#         self.mlp = nn.Sequential(
+#             nn.GELU(),
+#             nn.Linear(time_emb_dim, dim)
+#         ) if exists(time_emb_dim) else None
 
-        if with_time_emb:
-            time_dim = dim
-            self.time_mlp = nn.Sequential(
-                SinusoidalPosEmb(dim),
-                nn.Linear(dim, dim * 4),
-                nn.GELU(),
-                nn.Linear(dim * 4, dim)
-            )
-        else:
-            time_dim = None
-            self.time_mlp = None
+#         self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
 
-        self.downs = nn.ModuleList([])
-        self.ups = nn.ModuleList([])
-        num_resolutions = len(in_out)
+#         self.net = nn.Sequential(
+#             LayerNorm(dim) if norm else nn.Identity(),
+#             nn.Conv2d(dim, dim_out * mult, 3, padding=1),
+#             nn.GELU(),
+#             nn.Conv2d(dim_out * mult, dim_out, 3, padding=1)
+#         )
 
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (num_resolutions - 1)
+#         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
-            self.downs.append(nn.ModuleList([
-                ConvNextBlock(dim_in, dim_out, time_emb_dim=time_dim, norm=ind != 0),
-                ConvNextBlock(dim_out, dim_out, time_emb_dim=time_dim),
-                Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                Downsample(dim_out) if not is_last else nn.Identity()
-            ]))
+#     def forward(self, x, time_emb=None):
+#         h = self.ds_conv(x)
 
-        mid_dim = dims[-1]
-        self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
-        self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
-        self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
+#         if exists(self.mlp):
+#             assert exists(time_emb), 'time emb must be passed in'
+#             condition = self.mlp(time_emb)
+#             h = h + rearrange(condition, 'b c -> b c 1 1')
 
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
-            is_last = ind >= (num_resolutions - 1)
+#         h = self.net(h)
+#         return h + self.res_conv(x)
 
-            self.ups.append(nn.ModuleList([
-                ConvNextBlock(dim_out * 2, dim_in, time_emb_dim=time_dim),
-                ConvNextBlock(dim_in, dim_in, time_emb_dim=time_dim),
-                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                Upsample(dim_in) if not is_last else nn.Identity()
-            ]))
 
-        out_dim = default(out_dim, channels)
-        self.final_conv = nn.Sequential(
-            ConvNextBlock(dim, dim),
-            nn.Conv2d(dim, out_dim, 1)
-        )
+# class LinearAttention(nn.Module):
+#     def __init__(self, dim, heads=4, dim_head=32):
+#         super().__init__()
+#         self.scale = dim_head ** -0.5
+#         self.heads = heads
+#         hidden_dim = dim_head * heads
+#         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
+#         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
-    def forward(self, x, time):
-        orig_x = x
-        t = self.time_mlp(time) if exists(self.time_mlp) else None
+#     def forward(self, x):
+#         b, c, h, w = x.shape
+#         qkv = self.to_qkv(x).chunk(3, dim=1)
+#         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h=self.heads), qkv)
+#         q = q * self.scale
 
-        h = []
+#         k = k.softmax(dim=-1)
+#         context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
 
-        for convnext, convnext2, attn, downsample in self.downs:
-            x = convnext(x, t)
-            x = convnext2(x, t)
-            x = attn(x)
-            h.append(x)
-            x = downsample(x)
+#         out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
+#         out = rearrange(out, 'b h c (x y) -> b (h c) x y', h=self.heads, x=h, y=w)
+#         return self.to_out(out)
 
-        x = self.mid_block1(x, t)
-        x = self.mid_attn(x)
-        x = self.mid_block2(x, t)
 
-        for convnext, convnext2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim=1)
-            x = convnext(x, t)
-            x = convnext2(x, t)
-            x = attn(x)
-            x = upsample(x)
-        if self.residual:
-            return self.final_conv(x) + orig_x
+# class Unet(nn.Module):
+#     def __init__(
+#             self,
+#             dim,
+#             out_dim=None,
+#             dim_mults=(1, 2, 4, 8),
+#             channels=3,
+#             with_time_emb=True,
+#             residual=False
+#     ):
+#         super().__init__()
+#         self.channels = channels
+#         self.residual = residual
 
-        return self.final_conv(x)
+#         dims = [channels, *map(lambda m: dim * m, dim_mults)]
+#         in_out = list(zip(dims[:-1], dims[1:]))
+
+#         if with_time_emb:
+#             time_dim = dim
+#             self.time_mlp = nn.Sequential(
+#                 SinusoidalPosEmb(dim),
+#                 nn.Linear(dim, dim * 4),
+#                 nn.GELU(),
+#                 nn.Linear(dim * 4, dim)
+#             )
+#         else:
+#             time_dim = None
+#             self.time_mlp = None
+
+#         self.downs = nn.ModuleList([])
+#         self.ups = nn.ModuleList([])
+#         num_resolutions = len(in_out)
+
+#         for ind, (dim_in, dim_out) in enumerate(in_out):
+#             is_last = ind >= (num_resolutions - 1)
+
+#             self.downs.append(nn.ModuleList([
+#                 ConvNextBlock(dim_in, dim_out, time_emb_dim=time_dim, norm=ind != 0),
+#                 ConvNextBlock(dim_out, dim_out, time_emb_dim=time_dim),
+#                 Residual(PreNorm(dim_out, LinearAttention(dim_out))),
+#                 Downsample(dim_out) if not is_last else nn.Identity()
+#             ]))
+
+#         mid_dim = dims[-1]
+#         self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
+#         self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
+#         self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
+
+#         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+#             is_last = ind >= (num_resolutions - 1)
+
+#             self.ups.append(nn.ModuleList([
+#                 ConvNextBlock(dim_out * 2, dim_in, time_emb_dim=time_dim),
+#                 ConvNextBlock(dim_in, dim_in, time_emb_dim=time_dim),
+#                 Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+#                 Upsample(dim_in) if not is_last else nn.Identity()
+#             ]))
+
+#         out_dim = default(out_dim, channels)
+#         self.final_conv = nn.Sequential(
+#             ConvNextBlock(dim, dim),
+#             nn.Conv2d(dim, out_dim, 1)
+#         )
+
+#     def forward(self, x, time):
+#         orig_x = x
+#         t = self.time_mlp(time) if exists(self.time_mlp) else None
+
+#         h = []
+
+#         for convnext, convnext2, attn, downsample in self.downs:
+#             x = convnext(x, t)
+#             x = convnext2(x, t)
+#             x = attn(x)
+#             h.append(x)
+#             x = downsample(x)
+
+#         x = self.mid_block1(x, t)
+#         x = self.mid_attn(x)
+#         x = self.mid_block2(x, t)
+
+#         for convnext, convnext2, attn, upsample in self.ups:
+#             x = torch.cat((x, h.pop()), dim=1)
+#             x = convnext(x, t)
+#             x = convnext2(x, t)
+#             x = attn(x)
+#             x = upsample(x)
+#         if self.residual:
+#             return self.final_conv(x) + orig_x
+
+#         return self.final_conv(x)
 
 
 class GaussianDiffusion(nn.Module):
-    def __init__(
-            self,
-            defade_fn,
-            *,
-            image_size,
-            device_of_kernel,
-            channels=3,
-            timesteps=1000,
-            loss_type='l1',
-            kernel_std=0.1,
-            initial_mask=11,
-            fade_routine='Incremental',
-            sampling_routine='default',
-            discrete=False
-    ):
+    def __init__(self, defade_fn, cfg):
         super().__init__()
-        self.channels = channels
-        self.image_size = image_size
+        self.cfg = cfg
+        self.gpu = self.cfg.trainer.gpu
         self.defade_fn = defade_fn
-        self.device_of_kernel = device_of_kernel
-        self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
-        self.kernel_std = kernel_std
-        self.initial_mask = initial_mask
-        self.fade_routine = fade_routine
+        self.channels = self.cfg.trainer.diffusion.channels
+        self.image_size = self.cfg.trainer.diffusion.image_size
+        self.device_of_kernel = self.cfg.trainer.diffusion.device_of_kernel
+        self.num_timesteps = int(self.cfg.trainer.diffusion.timesteps)
+        self.loss_type = self.cfg.trainer.diffusion.loss_type
+        self.kernel_std = self.cfg.trainer.diffusion.kernel_std
+        self.initial_mask = self.cfg.trainer.diffusion.initial_mask
+        self.fade_routine = self.cfg.trainer.diffusion.fade_routine
+        self.sampling_routine = self.cfg.trainer.diffusion.sampling_routine
+        self.discrete = self.cfg.trainer.diffusion.discrete
         self.fade_kernels = self.get_kernels()
-        self.sampling_routine = sampling_routine
-        self.discrete = discrete
+        
+        if self.device_of_kernel != 'cuda':
+            raise NotImplementedError
 
     def get_fade_kernel(self, dims, std):
         fade_kernel = tgm.image.get_gaussian_kernel2d(dims, std)
         fade_kernel = fade_kernel / torch.max(fade_kernel)
-        fade_kernel = torch.ones_like(fade_kernel) - fade_kernel
-        # if self.device_of_kernel == 'cuda':
-        #     fade_kernel = fade_kernel.cuda()
+        fade_kernel = torch.ones_like(fade_kernel) - fade_kernel       
+        fade_kernel = fade_kernel.cuda(self.gpu)
         fade_kernel = fade_kernel[1:, 1:]
         return fade_kernel
 
@@ -349,17 +343,17 @@ class GaussianDiffusion(nn.Module):
                 kernels.append(self.get_fade_kernel((2 * self.image_size + 1, 2 * self.image_size + 1),
                                                     (self.kernel_std * (i + self.initial_mask),
                                                      self.kernel_std * (i + self.initial_mask))))
-        return torch.stack(kernels)
+        return torch.stack(kernels).cuda(self.gpu)
 
     @torch.no_grad()
     def sample(self, batch_size=16, faded_recon_sample=None, t=None):
 
         rand_fade_kernels = None
-        sample_device = faded_recon_sample.device
+        # sample_device = faded_recon_sample.device
         if 'Random' in self.fade_routine:
             rand_fade_kernels = []
-            rand_x = torch.randint(0, self.image_size + 1, (batch_size,), device=sample_device).long()
-            rand_y = torch.randint(0, self.image_size + 1, (batch_size,), device=sample_device).long()
+            rand_x = torch.randint(0, self.image_size + 1, (batch_size,), device=self.gpu).long()
+            rand_y = torch.randint(0, self.image_size + 1, (batch_size,), device=self.gpu).long()
             for i in range(batch_size):
                 rand_fade_kernels.append(torch.stack(
                     [self.fade_kernels[j][rand_x[i]:rand_x[i] + self.image_size,
@@ -371,12 +365,12 @@ class GaussianDiffusion(nn.Module):
         for i in range(t):
             with torch.no_grad():
                 if rand_fade_kernels is not None:
-                    faded_recon_sample = torch.stack([rand_fade_kernels[:, i].to(sample_device),
-                                                      rand_fade_kernels[:, i].to(sample_device),
-                                                      rand_fade_kernels[:, i].to(sample_device)],
+                    faded_recon_sample = torch.stack([rand_fade_kernels[:, i],
+                                                      rand_fade_kernels[:, i],
+                                                      rand_fade_kernels[:, i]],
                                                      1) * faded_recon_sample
                 else:
-                    faded_recon_sample = self.fade_kernels[i].to(sample_device) * faded_recon_sample
+                    faded_recon_sample = self.fade_kernels[i] * faded_recon_sample
 
         if self.discrete:
             faded_recon_sample = (faded_recon_sample + 1) * 0.5
@@ -389,7 +383,7 @@ class GaussianDiffusion(nn.Module):
         recon_sample = None
 
         while t:
-            step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
+            step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda(self.gpu)
             recon_sample = self.defade_fn(faded_recon_sample, step)
 
             if direct_recons is None:
@@ -399,11 +393,11 @@ class GaussianDiffusion(nn.Module):
                 for i in range(t - 1):
                     with torch.no_grad():
                         if rand_fade_kernels is not None:
-                            recon_sample = torch.stack([rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device)], 1) * recon_sample
+                            recon_sample = torch.stack([rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i],], 1) * recon_sample
                         else:
-                            recon_sample = self.fade_kernels[i].to(sample_device) * recon_sample
+                            recon_sample = self.fade_kernels[i] * recon_sample
                 faded_recon_sample = recon_sample
 
             elif self.sampling_routine == 'x0_step_down':
@@ -411,11 +405,11 @@ class GaussianDiffusion(nn.Module):
                     with torch.no_grad():
                         recon_sample_sub_1 = recon_sample
                         if rand_fade_kernels is not None:
-                            recon_sample = torch.stack([rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device)], 1) * recon_sample
+                            recon_sample = torch.stack([rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i]], 1) * recon_sample
                         else:
-                            recon_sample = self.fade_kernels[i].to(sample_device) * recon_sample
+                            recon_sample = self.fade_kernels[i]* recon_sample
 
                 faded_recon_sample = faded_recon_sample - recon_sample + recon_sample_sub_1
 
@@ -427,11 +421,10 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     def all_sample(self, batch_size=16, faded_recon_sample=None, t=None, times=None):
         rand_fade_kernels = None
-        sample_device = faded_recon_sample.device
         if 'Random' in self.fade_routine:
             rand_fade_kernels = []
-            rand_x = torch.randint(0, self.image_size + 1, (batch_size,), device=faded_recon_sample.device).long()
-            rand_y = torch.randint(0, self.image_size + 1, (batch_size,), device=faded_recon_sample.device).long()
+            rand_x = torch.randint(0, self.image_size + 1, (batch_size,), device= self.gpu).long()
+            rand_y = torch.randint(0, self.image_size + 1, (batch_size,), device=self.gpu).long()
             for i in range(batch_size, ):
                 rand_fade_kernels.append(torch.stack(
                     [self.fade_kernels[j][rand_x[i]:rand_x[i] + self.image_size,
@@ -445,11 +438,11 @@ class GaussianDiffusion(nn.Module):
         for i in range(t):
             with torch.no_grad():
                 if 'Random' in self.fade_routine:
-                    faded_recon_sample = torch.stack([rand_fade_kernels[:, i].to(sample_device),
-                                                      rand_fade_kernels[:, i].to(sample_device),
-                                                      rand_fade_kernels[:, i].to(sample_device)], 1) * faded_recon_sample
+                    faded_recon_sample = torch.stack([rand_fade_kernels[:, i],
+                                                      rand_fade_kernels[:, i],
+                                                      rand_fade_kernels[:, i]], 1) * faded_recon_sample
                 else:
-                    faded_recon_sample = self.fade_kernels[i].to(sample_device) * faded_recon_sample
+                    faded_recon_sample = self.fade_kernels[i] * faded_recon_sample
 
         if self.discrete:
             faded_recon_sample = (faded_recon_sample + 1) * 0.5
@@ -461,7 +454,7 @@ class GaussianDiffusion(nn.Module):
         xt_list = []
 
         while times:
-            step = torch.full((batch_size,), times - 1, dtype=torch.long).cuda()
+            step = torch.full((batch_size,), times - 1, dtype=torch.long).cuda(self.gpu)
             recon_sample = self.defade_fn(faded_recon_sample, step)
             x0_list.append(recon_sample)
 
@@ -469,11 +462,11 @@ class GaussianDiffusion(nn.Module):
                 for i in range(times - 1):
                     with torch.no_grad():
                         if rand_fade_kernels is not None:
-                            recon_sample = torch.stack([rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device)], 1) * recon_sample
+                            recon_sample = torch.stack([rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i]], 1) * recon_sample
                         else:
-                            recon_sample = self.fade_kernels[i].to(sample_device) * recon_sample
+                            recon_sample = self.fade_kernels[i] * recon_sample
                 faded_recon_sample = recon_sample
 
             elif self.sampling_routine == 'x0_step_down':
@@ -481,11 +474,11 @@ class GaussianDiffusion(nn.Module):
                     with torch.no_grad():
                         recon_sample_sub_1 = recon_sample
                         if rand_fade_kernels is not None:
-                            recon_sample = torch.stack([rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device),
-                                                        rand_fade_kernels[:, i].to(sample_device)], 1) * recon_sample
+                            recon_sample = torch.stack([rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i],
+                                                        rand_fade_kernels[:, i]], 1) * recon_sample
                         else:
-                            recon_sample = self.fade_kernels[i].to(sample_device) * recon_sample
+                            recon_sample = self.fade_kernels[i] * recon_sample
                 faded_recon_sample = faded_recon_sample - recon_sample + recon_sample_sub_1
 
             xt_list.append(faded_recon_sample)
@@ -649,72 +642,59 @@ class DatasetCelebATest(data.Dataset):
 
 
 class Trainer(object):
-    def __init__(
-            self,
-            diffusion_model,
-            folder,
-            *,
-            ema_decay=0.995,
-            image_size=128,
-            train_batch_size=32,
-            train_lr=2e-5,
-            train_num_steps=700000,
-            gradient_accumulate_every=2,
-            fp16=False,
-            step_start_ema=2000,
-            update_ema_every=10,
-            save_and_sample_every=10000,
-            results_folder='./results',
-            load_path=None,
-            dataset=None
-    ):
+    def __init__(self, diffusion_model,cfg, writer):
+
         super().__init__()
+        self.cfg = cfg
         self.model = diffusion_model
-        self.ema = EMA(ema_decay)
+        self.ema = EMA(self.cfg.trainer.ema_decay)
         self.ema_model = copy.deepcopy(self.model)
-        self.update_ema_every = update_ema_every
+        self.update_ema_every = self.cfg.trainer.update_ema_every
 
-        self.step_start_ema = step_start_ema
-        self.save_and_sample_every = save_and_sample_every
-
-        self.batch_size = train_batch_size
+        self.step_start_ema = self.cfg.trainer.step_start_ema
+        self.save_and_sample_every = self.cfg.trainer.save_and_sample_every
+        self.train_lr = self.cfg.trainer.lr
+        self.batch_size = self.cfg.trainer.train_batch_size
         self.image_size = diffusion_model.module.image_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-        self.train_num_steps = train_num_steps
+        self.gradient_accumulate_every = self.cfg.trainer.gradient_accumulate_every
+        self.train_num_steps = self.cfg.trainer.train_num_steps
+        self.writer = writer
+        self.fp16 = self.cfg.trainer.fp16
 
-        if dataset == 'cifar10':
-            self.ds = DatasetCifar10(folder, image_size)
-        elif dataset == 'celebA':
-            self.ds = DatasetCelebA(folder, image_size)
-        elif dataset == 'celebA_test':
-            self.ds = DatasetCelebATest(folder, image_size)
+        if self.cfg.dataset.name == 'cifar10':
+            self.ds = DatasetCifar10(self.cfg.dataset.folder, self.image_size)
+        elif self.cfg.dataset.name == 'celebA':
+            self.ds = DatasetCelebA(self.cfg.dataset.folder, self.image_size)
+        elif self.cfg.dataset.name == 'celebA_test':
+            self.ds = DatasetCelebATest(self.cfg.dataset.folder, self.image_size)
         else:
-            self.ds = Dataset(folder, image_size)
+            self.ds = Dataset(self.cfg.dataset.folder, self.image_size)
+        self.sampler = DistributedSampler(self.ds, num_replicas=self.cfg.trainer.world_size, rank=self.cfg.trainer.rank)
         self.dl = cycle(
             data.DataLoader(self.ds,
-                            batch_size=train_batch_size,
-                            shuffle=True,
+                            batch_size=self.batch_size,
+                            sampler=self.sampler,
                             pin_memory=True,
                             num_workers=16,
                             drop_last=True))
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+        self.opt = Adam(diffusion_model.parameters(), lr=self.train_lr)
 
         self.step = 0
 
-        assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed for mixed precision training on'
+        assert not self.fp16 or self.fp16 and APEX_AVAILABLE, 'Apex must be installed for mixed precision training on'
 
-        self.fp16 = fp16
-        if fp16:
+        
+        if self.fp16:
             (self.model, self.ema_model), self.opt = amp.initialize([self.model, self.ema_model], self.opt,
                                                                     opt_level='O1')
 
-        self.results_folder = Path(results_folder)
+        self.results_folder = Path(self.cfg.trainer.results_folder)
         self.results_folder.mkdir(exist_ok=True)
 
         self.reset_parameters()
 
-        if load_path is not None:
-            self.load(load_path)
+        if self.cfg.trainer.checkpointpath is not None:
+            self.load(self.cfg.trainer.checkpointpath)
 
     def reset_parameters(self):
         self.ema_model.load_state_dict(self.model.state_dict())
@@ -771,6 +751,8 @@ class Trainer(object):
                 loss = torch.mean(self.model(inputs))
                 print(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
+                if self.writer is not None:
+                    self.writer.add_scalar("Train/Loss", loss.item(), self.step)
                 backwards(loss / self.gradient_accumulate_every, self.opt)
             # writer.add_scalar("Loss/train", loss.item(), self.step)
             acc_loss = acc_loss + (u_loss / self.gradient_accumulate_every)
@@ -800,7 +782,12 @@ class Trainer(object):
                 xt = (xt + 1) * 0.5
                 utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
                                  nrow=6)
-
+                if self.cfg.trainer.gpu == 0:
+                    LOG.info("Logging image")
+                    wandb.log({f"original_sample{self.step}": wandb.Image(str(self.results_folder / f'sample-og-{milestone}.png'))})
+                    wandb.log({f"full_reconstruction{self.step}": wandb.Image(str(self.results_folder / f'sample-recon-{milestone}.png'))})
+                    wandb.log({f"direct_reconstruction_{self.step}": wandb.Image(str(self.results_folder / f'sample-direct_recons-{milestone}.png'))})
+                    wandb.log({f"xt{self.step}": wandb.Image(str(self.results_folder / f'sample-xt-{milestone}.png'))})
                 acc_loss = acc_loss / (self.save_and_sample_every + 1)
                 print(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss = 0

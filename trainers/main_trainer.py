@@ -6,31 +6,30 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.nn.parallel import DistributedDataParallel
 import torch.distributed as dist
 from trainers.base_trainer import BaseTrainer
-
+from models.Unet import Unet , EMA
 LOG = logging.getLogger(__name__)
 
 class MainTrainer(BaseTrainer):
     def __init__(self, cfg: DictConfig) -> None:
         super().__init__(cfg)
-        global Unet
         global GaussianDiffusion
         global Trainer
         LOG.info(f"Diffusion type : {cfg.trainer.diffusion.type}")
         if cfg.trainer.diffusion.type == "deblur" :
-            from trainers.deblurring_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+            from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'decolor':
             raise NotImplementedError
-            from trainers.deblurring_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
-        elif cfg.trainer.diffusion.type == 'defade':
-            from trainers.defading_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+            from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
+        elif cfg.trainer.diffusion.type == 'defade_gaussian':
+            from trainers.defading_diffusion_gaussian import  GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'defade_generate':
-            from trainers.defading_generation_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+            from trainers.defading_generation_diffusion_pytorch import  GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'demix':
-            from trainers.demixing_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+            from trainers.demixing_diffusion_pytorch import GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'denoise':
-            from trainers.denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+            from trainers.denoising_diffusion_pytorch import GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'resolution':
-            from trainers.resolution_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+            from trainers.resolution_diffusion_pytorch import GaussianDiffusion, Trainer
         else:
             raise NotImplementedError
 
@@ -42,7 +41,7 @@ class MainTrainer(BaseTrainer):
         LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
         # Instantiate the model and optimizer
         self.model = Unet(self.cfg)          
-        self.diffusion = GaussianDiffusion(self.model,self.cfg)
+        self.diffusion = GaussianDiffusion(self.model, self.cfg)
         
         if self.cfg.trainer.gpu is not None:
             torch.cuda.set_device(self.cfg.trainer.gpu)

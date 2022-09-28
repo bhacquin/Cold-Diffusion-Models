@@ -11,3 +11,4 @@ train.log
 .hydra
 .idea
 __pycache__
+*/__pycache__
