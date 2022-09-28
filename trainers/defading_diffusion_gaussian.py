@@ -23,7 +23,7 @@ from pytorch_msssim import ssim
 import cv2
 import numpy as np
 import imageio
-
+import logging
 # from torch.utils.tensorboard import SummaryWriter
 
 try:
@@ -35,6 +35,9 @@ except:
 
 from utils_metrics.utils import exists, default, cycle, cycle_cat, num_to_groups, loss_backwards, extract, noise_like, cosine_beta_schedule
 from models.Unet import Unet, EMA
+
+
+LOG = logging.getLogger(__name__)
 
 # def exists(x):
 #     return x is not None
@@ -714,7 +717,7 @@ class Trainer(object):
         torch.save(model_data, str(self.results_folder / f'model.pt'))
 
     def load(self, load_path):
-        print("Loading : ", load_path)
+        LOG.info(f"Loading : {load_path}")
         model_data = torch.load(load_path)
 
         self.step = model_data['step']
@@ -749,7 +752,7 @@ class Trainer(object):
                 inputs = next(self.dl).cuda()
                 # loss = self.model(inputs)
                 loss = torch.mean(self.model(inputs))
-                print(f'{self.step}: {loss.item()}')
+                # print(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
                 if self.writer is not None:
                     self.writer.add_scalar("Train/Loss", loss.item(), self.step)
@@ -789,14 +792,14 @@ class Trainer(object):
                     wandb.log({f"direct_reconstruction_{self.step}": wandb.Image(str(self.results_folder / f'sample-direct_recons-{milestone}.png'))})
                     wandb.log({f"xt{self.step}": wandb.Image(str(self.results_folder / f'sample-xt-{milestone}.png'))})
                 acc_loss = acc_loss / (self.save_and_sample_every + 1)
-                print(f'Mean of last {self.step}: {acc_loss}')
+                LOG.info(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss = 0
 
                 self.save()
 
             self.step += 1
 
-        print('training completed')
+        LOG.info('training completed')
 
     def test_from_data(self, extra_path, s_times=None):
         batches = self.batch_size
@@ -810,7 +813,7 @@ class Trainer(object):
         frames_0 = []
 
         for i in range(len(x0_list)):
-            print(i)
+            LOG.debug(i)
 
             x_0 = x0_list[i]
             x_0 = (x_0 + 1) * 0.5
@@ -848,7 +851,7 @@ class Trainer(object):
         frames_0 = []
 
         for i in range(len(x0_list)):
-            print(i)
+            LOG.debug(i)
             x_0 = x0_list[i]
             x_0 = (x_0 + 1) * 0.5
             utils.save_image(x_0, str(self.results_folder / f'sample-{i}-{extra_path}-x0.png'), nrow=6)
@@ -882,7 +885,6 @@ class Trainer(object):
         frames_0_names = []
 
         for i in range(len(x0_list)):
-            print(i)
 
             x_0 = x0_list[i]
             x_0 = (x_0 + 1) * 0.5
@@ -899,7 +901,6 @@ class Trainer(object):
         frames_0 = []
         frames_t = []
         for i in range(len(x0_list)):
-            print(i)
             frames_0.append(imageio.imread(frames_0_names[i]))
             frames_t.append(imageio.imread(frames_t_names[i]))
 
@@ -932,17 +933,17 @@ class Trainer(object):
         all_samples = []
         dataset = self.ds
 
-        print(len(dataset))
+        LOG.info(f"Dataset length : {len(dataset)}")
         for idx in range(len(dataset)):
             img = dataset[idx]
             img = torch.unsqueeze(img, 0).cuda()
             if idx > start:
                 all_samples.append(img[0])
             if idx % 1000 == 0:
-                print(idx)
+                LOG.debug(f"idx : {idx}")
             if end is not None:
                 if idx == end:
-                    print(idx)
+                    LOG.debug(f"idx end: {idx}")
                     break
 
         all_samples = torch.stack(all_samples)
@@ -959,7 +960,7 @@ class Trainer(object):
             og_x = og_x.cuda()
             og_x = og_x.type(torch.cuda.FloatTensor)
             og_img = og_x
-            print(og_img.shape)
+            LOG.debug(f"og_img.shape {og_img.shape}")
             x0_list, xt_list = self.ema_model.module.all_sample(batch_size=og_img.shape[0],
                                                          faded_recon_sample=og_img,
                                                          times=None)
@@ -980,11 +981,10 @@ class Trainer(object):
             direct_deblurry_imgs = (direct_deblurry_imgs + 1) * 0.5
 
             if cnt == 0:
-                print(og_img.shape)
-                print(blurry_imgs.shape)
-                print(deblurry_imgs.shape)
-                print(direct_deblurry_imgs.shape)
-
+                LOG.debug(f"og_img.shape {og_img.shape}")
+                LOG.debug(f"blurry_imgs.shape {blurry_imgs.shape}")
+                LOG.debug(f"deblurry_imgs.shape {deblurry_imgs.shape}")
+                LOG.debug(f"direct_deblurry_imgs.shape {direct_deblurry_imgs.shape}")
                 if sanity_check:
                     folder = './sanity_check/'
                     create_folder(folder)
@@ -1023,35 +1023,35 @@ class Trainer(object):
 
             cnt += og_img.shape[0]
 
-        print(blurred_samples.shape)
-        print(original_sample.shape)
-        print(deblurred_samples.shape)
-        print(direct_deblurred_samples.shape)
+        LOG.debug(f"blurred_samples.shape {blurred_samples.shape}")
+        LOG.debug(f"original_sample.shape {original_sample.shape}")
+        LOG.debug(f"deblurred_samples.shape {deblurred_samples.shape}")
+        LOG.debug(f"direct_deblurred_samples.shape {direct_deblurred_samples.shape}")
 
         fid_blur = fid_func(samples=[original_sample, blurred_samples])
         rmse_blur = torch.sqrt(torch.mean((original_sample - blurred_samples) ** 2))
         ssim_blur = ssim(original_sample, blurred_samples, data_range=1, size_average=True)
-        print(f'The FID of blurry images with original image is {fid_blur}')
-        print(f'The RMSE of blurry images with original image is {rmse_blur}')
-        print(f'The SSIM of blurry images with original image is {ssim_blur}')
+        LOG.info(f'The FID of blurry images with original image is {fid_blur}')
+        LOG.info(f'The RMSE of blurry images with original image is {rmse_blur}')
+        LOG.info(f'The SSIM of blurry images with original image is {ssim_blur}')
 
         fid_deblur = fid_func(samples=[original_sample, deblurred_samples])
         rmse_deblur = torch.sqrt(torch.mean((original_sample - deblurred_samples) ** 2))
         ssim_deblur = ssim(original_sample, deblurred_samples, data_range=1, size_average=True)
-        print(f'The FID of deblurred images with original image is {fid_deblur}')
-        print(f'The RMSE of deblurred images with original image is {rmse_deblur}')
-        print(f'The SSIM of deblurred images with original image is {ssim_deblur}')
+        LOG.info(f'The FID of deblurred images with original image is {fid_deblur}')
+        LOG.info(f'The RMSE of deblurred images with original image is {rmse_deblur}')
+        LOG.info(f'The SSIM of deblurred images with original image is {ssim_deblur}')
 
-        print(f'Hence the improvement in FID using sampling is {fid_blur - fid_deblur}')
+        LOG.info(f'Hence the improvement in FID using sampling is {fid_blur - fid_deblur}')
 
         fid_direct_deblur = fid_func(samples=[original_sample, direct_deblurred_samples])
         rmse_direct_deblur = torch.sqrt(torch.mean((original_sample - direct_deblurred_samples) ** 2))
         ssim_direct_deblur = ssim(original_sample, direct_deblurred_samples, data_range=1, size_average=True)
-        print(f'The FID of direct deblurred images with original image is {fid_direct_deblur}')
-        print(f'The RMSE of direct deblurred images with original image is {rmse_direct_deblur}')
-        print(f'The SSIM of direct deblurred images with original image is {ssim_direct_deblur}')
+        LOG.info(f'The FID of direct deblurred images with original image is {fid_direct_deblur}')
+        LOG.info(f'The RMSE of direct deblurred images with original image is {rmse_direct_deblur}')
+        LOG.info(f'The SSIM of direct deblurred images with original image is {ssim_direct_deblur}')
 
-        print(f'Hence the improvement in FID using direct sampling is {fid_blur - fid_direct_deblur}')
+        LOG.info(f'Hence the improvement in FID using direct sampling is {fid_blur - fid_direct_deblur}')
 
     def paper_invert_section_images(self, s_times=None):
 
@@ -1059,8 +1059,8 @@ class Trainer(object):
         for i in range(50):
             batches = self.batch_size
             og_img = next(self.dl).cuda()
-            print(og_img.shape)
-
+            LOG.debug(f"og_img.shape : {og_img.shape}")
+            
             x0_list, xt_list = self.ema_model.module.all_sample(batch_size=batches,
                                                          faded_recon_sample=og_img,
                                                          times=s_times)
@@ -1106,7 +1106,7 @@ class Trainer(object):
         for i in range(100):
             batches = self.batch_size
             og_img = next(self.dl).cuda()
-            print(og_img.shape)
+            LOG.debug(f"og_img.shape {og_img.shape}")
 
             x0_list, xt_list = self.ema_model.module.all_sample(batch_size=batches, faded_recon_sample=og_img, times=s_times)
 
@@ -1138,8 +1138,7 @@ class Trainer(object):
         all_samples = None
 
         for i, img in enumerate(dl, 0):
-            print(i)
-            print(img.shape)
+            LOG.debug(f"img.shape {img.shape}")
             if all_samples is None:
                 all_samples = img
             else:
@@ -1169,7 +1168,6 @@ class Trainer(object):
 
         cnt = 0
         while cnt < all_samples.shape[0]:
-            print(cnt)
             og_x = all_samples[cnt: cnt + 32]
             og_x = og_x.cuda()
             og_x = og_x.type(torch.cuda.FloatTensor)
@@ -1192,11 +1190,10 @@ class Trainer(object):
             direct_deblurry_imgs = (direct_deblurry_imgs + 1) * 0.5
 
             if cnt == 0:
-                print(og_img.shape)
-                print(blurry_imgs.shape)
-                print(deblurry_imgs.shape)
-                print(direct_deblurry_imgs.shape)
-
+                LOG.debug(f"og_img.shape : {og_img.shape} ")
+                LOG.debug(f"blurry_imgs.shape : {blurry_imgs.shape} ")
+                LOG.debug(f"deblurry_imgs.shape : {deblurry_imgs.shape} ")
+                LOG.debug(f"direct_deblurry_imgs.shape : {direct_deblurry_imgs.shape} ")
             if blurred_samples is None:
                 blurred_samples = blurry_imgs
             else:
@@ -1219,11 +1216,10 @@ class Trainer(object):
 
             cnt += og_img.shape[0]
 
-        print(blurred_samples.shape)
-        print(original_sample.shape)
-        print(deblurred_samples.shape)
-        print(direct_deblurred_samples.shape)
-
+        LOG.debug(f"blurred_samples.shape : {blurred_samples.shape} ")
+        LOG.debug(f"original_sample.shape : {original_sample.shape} ")
+        LOG.debug(f"deblurred_samples.shape : {deblurred_samples.shape} ")
+        LOG.debug(f"direct_deblurred_samples.shape : {direct_deblurred_samples.shape} ")
         for i in range(blurred_samples.shape[0]):
             utils.save_image(original_sample[i], f'{orig_folder}{i}.png', nrow=1)
             utils.save_image(blurred_samples[i], f'{blur_folder}{i}.png', nrow=1)
