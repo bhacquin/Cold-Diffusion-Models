@@ -2,7 +2,7 @@ defaults:
   - base_trainer
 
 name: blur_diffusion
-platform: local
+platform: slurm
 
 log_level: INFO
 results_folder: ./results

@@ -5,6 +5,7 @@ import os
 from omegaconf import DictConfig, open_dict
 from torch.distributed.elastic.multiprocessing.errors import record
 from trainers.main_trainer import MainTrainer
+from utils_metrics.utils import get_output_dir
 LOG = logging.getLogger(__name__)
 
 @record
@@ -21,10 +22,10 @@ def main(cfg: DictConfig) -> int:
         return 0
     LOG.info(f"Current working directory at 1: {os.getcwd()}")
     with open_dict(cfg):
-        cfg.trainer.output_dir = str(get_output_dir(cfg, cfg.trainer.sync_key))
+        cfg.trainer.results_folder = str(get_output_dir(cfg, cfg.trainer.sync_key))
 
     # Mode SLURM
-    executor = submitit.AutoExecutor(folder=cfg.trainer.output_dir, slurm_max_num_timeout=30)
+    executor = submitit.AutoExecutor(folder=cfg.trainer.results_folder, slurm_max_num_timeout=30)
     executor.update_parameters(
         mem_gb=cfg.trainer.slurm.mem,
         gpus_per_node=cfg.trainer.slurm.gpus_per_node,

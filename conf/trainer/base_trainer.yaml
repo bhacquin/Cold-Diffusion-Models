@@ -28,6 +28,7 @@ slurm:
   partition: gpu
   qos: gpu
   account: vita # optional
+  reservation:
 
 # Dummy trainer HyperParams
 num_epoch: 2

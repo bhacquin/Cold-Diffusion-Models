@@ -16,7 +16,7 @@ except:
 
 
 def get_output_dir(cfg, job_id=None) -> Path:
-    out_dir = Path(cfg.trainer.output_dir)
+    out_dir = Path(cfg.trainer.results_folder)
     exp_name = str(cfg.trainer.ml_exp_name)
     folder_name = exp_name+'_'+str(job_id)
     p = Path(out_dir).expanduser()

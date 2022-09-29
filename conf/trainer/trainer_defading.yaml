@@ -1,3 +1,6 @@
+defaults:
+  - base_trainer
+  
 name: defade_diffusion
 platform: local
 

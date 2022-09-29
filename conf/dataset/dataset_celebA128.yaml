@@ -1,3 +1,5 @@
+defaults:
+  - base_dataset
 name: celebA
 folder: root_celebA_128_train_new/
 
