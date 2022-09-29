@@ -1,7 +1,7 @@
 defaults:
   - base_trainer
 
-name: blur_diffusion
+name: remixing_diffusion
 platform: local
 
 log_level: INFO
@@ -12,7 +12,7 @@ seed: 42
 use_clearml: false 
 use_wandb: true
 wandb_entity: bastienvd
-ml_exp_name: Diffusion_Blur
+ml_exp_name: Diffusion_remixing
 
 
 #### Trainer params
@@ -29,15 +29,14 @@ save_and_sample_every: 500
 
 #### Diffusion params
 diffusion:
-  type: deblur
+  type: demix
   device_of_kernel: cuda
   image_size: 128
   channels: 3
   timesteps: 1000   # number of steps
   loss_type: l1
   kernel_std: 0.15
-  kernel_size: 3
-  blur_routine: Incremental             
+  kernel_size: 3           
   train_routine: Final
   sampling_routine: x0_step_down
   discrete: false

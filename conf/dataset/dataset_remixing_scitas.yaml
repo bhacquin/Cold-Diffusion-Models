@@ -1,0 +1,10 @@
+defaults:
+  - base_dataset
+name: celebA
+folder1: /work/scitas/bastien/root_celebA_128_train_new/
+folder2: AFHQ/afhq/train/
+
+
+
+
+
