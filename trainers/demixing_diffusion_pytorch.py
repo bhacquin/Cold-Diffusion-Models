@@ -73,21 +73,17 @@ class GaussianDiffusion(nn.Module):
 
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, img = None, noise = None,  t=None):
+    def sample(self, batch_size = 16, img = None, t=None):
         
         self.denoise_fn.eval()
 
         if t == None:
             t = self.num_timesteps
-        elif t < 2:
-            LOG.info(f"timesteps changed to 3 per default.")
-            t = 3
+        # elif t < 2:
+        #     LOG.info(f"timesteps changed to 3 per default.")
+        #     t = 3
 
-        img1 = img
-        img2 = noise
-        with torch.no_grad():
-            step = torch.full((batch_size,), int((t-2)/2), dtype=torch.long, device=img1.device)
-            img = self.q_sample(x_start=img1, x_end=img2, t=step)
+
 
         xt = img
         direct_recons = None
@@ -528,42 +524,21 @@ class Trainer(object):
                 # og_img = next(self.dl2).cuda(self.cfg.trainer.gpu).float()
                 og_img1 = next(self.dl1).cuda(self.gpu)
                 og_img2 = next(self.dl2).cuda(self.gpu)
-                xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=og_img1, noise = og_img2)
+                with torch.no_grad():
+                    step = torch.full((batch_size,), int((self.num_timesteps-2)/2), dtype=torch.long, device=og_img1.device)
+                    img = self.q_sample(x_start=og_img1, x_end=og_img2, t=step)
+                xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=img)
                 self.save_image_and_log(og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train')
                 if self.mode == "train":
                     test_img1 = next(self.dl1).cuda(self.gpu)
                     test_img2 = next(self.dl2).cuda(self.gpu)
-                    test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=test_img1, noise = test_img2)
+                    with torch.no_grad():
+                        step = torch.full((batch_size,), int((self.num_timesteps-2)/2), dtype=torch.long, device=test_img1.device)
+                        img = self.q_sample(x_start=test_img1, x_end=test_img2, t=step)
+                    test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=img)
                     self.save_image_and_log(test_img1, test_img2, test_all_images, test_direct_recons, test_xt, test_noise_image, milestone, mode = 'Test')
                 # Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img1=og_img1, img2=og_img2)
                 
-                
-                # og_img1 = (og_img1 + 1) * 0.5
-                # utils.save_image(og_img1, str(self.results_folder / f'sample-og1-{milestone}.png'), nrow=6)
-
-                # og_img2 = (og_img2 + 1) * 0.5
-                # utils.save_image(og_img2, str(self.results_folder / f'sample-og2-{milestone}.png'), nrow=6)
-
-                # all_images = (all_images + 1) * 0.5
-                # utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
-
-                # direct_recons = (direct_recons + 1) * 0.5
-                # utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
-
-                # xt = (xt + 1) * 0.5
-                # utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),nrow=6)
-
-                # noise_image = (noise_image + 1) * 0.5
-                # utils.save_image(noise_image, str(self.results_folder / f'noise_image_recons-{milestone}.png'), nrow=6)
-                # time.sleep(1)
-                # if self.cfg.trainer.gpu == 0:
-                #     LOG.info("Logging image")
-                #     wandb.log({f"target_sample_{self.step}": wandb.Image(str(self.results_folder / f'sample-og1-{milestone}.png'))})
-                #     wandb.log({f"noise_sample_{self.step}": wandb.Image(str(self.results_folder / f'sample-og2-{milestone}.png'))})
-                #     wandb.log({f"full_reconstruction{self.step}": wandb.Image(str(self.results_folder / f'sample-recon-{milestone}.png'))})
-                #     wandb.log({f"direct_reconstruction_{self.step}": wandb.Image(str(self.results_folder / f'sample-direct_recons-{milestone}.png'))})
-                #     wandb.log({f"xt_{self.step}": wandb.Image(str(self.results_folder / f'sample-xt-{milestone}.png'))})
-                #     wandb.log({f"noise_reconstruction_{self.step}": wandb.Image(str(self.results_folder / f'noise_image_recons-{milestone}.png'))})
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
                 # experiment.log_metric("Training Loss", acc_loss, step=self.step)
                 dist.barrier()

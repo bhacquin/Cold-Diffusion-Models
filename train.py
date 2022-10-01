@@ -12,17 +12,17 @@ LOG = logging.getLogger(__name__)
 @hydra.main(config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> int:
     trainer = MainTrainer(cfg)
+    with open_dict(cfg):
+        cfg.trainer.results_folder = str(get_output_dir(cfg, cfg.trainer.sync_key))
     if cfg.trainer.platform == "local":
-        LOG.info(f"Current working directory at 0: {os.getcwd()}")
         # LOG.info(f"Output directory {cfg.trainer.output_dir}/{cfg.trainer.sync_key}")
         trainer.setup_platform()
         trainer.setup_tracker()
         trainer.setup_trainer()
         trainer.run()
         return 0
-    LOG.info(f"Current working directory at 1: {os.getcwd()}")
-    with open_dict(cfg):
-        cfg.trainer.results_folder = str(get_output_dir(cfg, cfg.trainer.sync_key))
+    LOG.info(f"Current working directory: {os.getcwd()}")
+
 
     # Mode SLURM
     executor = submitit.AutoExecutor(folder=cfg.trainer.results_folder, slurm_max_num_timeout=30)
