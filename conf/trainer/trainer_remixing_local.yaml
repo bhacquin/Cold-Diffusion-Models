@@ -5,27 +5,27 @@ name: remixing_diffusion
 platform: local
 
 log_level: INFO
-results_folder: ./results
+results_folder: ${trainer.results_dir}/${trainer.name}_${dataset.name}
 checkpointpath: 
 seed: 42
 #### Tracker
 use_clearml: false 
 use_wandb: true
 wandb_entity: bastienvd
-ml_exp_name: Diffusion_remixing
+ml_exp_name: Remixing_faces
 
 
 #### Trainer params
 ema_decay: 0.995
 image_size: 128
-train_batch_size: 32
+train_batch_size: 64
 lr: 2e-5
 train_num_steps: 700000
 gradient_accumulate_every: 1
 fp16: false
 step_start_ema: 2000
 update_ema_every: 10
-save_and_sample_every: 500 
+save_and_sample_every: 1000
 
 #### Diffusion params
 diffusion:
@@ -33,10 +33,10 @@ diffusion:
   device_of_kernel: cuda
   image_size: 128
   channels: 3
-  timesteps: 1000   # number of steps
+  timesteps: 200   # number of steps
   loss_type: l1
-  kernel_std: 0.15
-  kernel_size: 3           
+  # kernel_std: 0.15
+  # kernel_size: 3           
   train_routine: Final
   sampling_routine: x0_step_down
   discrete: false

@@ -35,9 +35,8 @@ except:
 
 from utils_metrics.utils import exists, default, cycle, cycle_cat, num_to_groups, loss_backwards, extract, noise_like, cosine_beta_schedule
 from models.Unet import Unet, EMA
-
-
 LOG = logging.getLogger(__name__)
+
 
 # def exists(x):
 #     return x is not None

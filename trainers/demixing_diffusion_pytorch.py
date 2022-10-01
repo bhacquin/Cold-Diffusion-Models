@@ -1,4 +1,4 @@
-from comet_ml import Experiment
+
 import math
 import copy
 import torch
@@ -13,9 +13,13 @@ from torch.optim import Adam
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DistributedSampler
 from torchvision import transforms, utils
-from PIL import Image
+from PIL import Image, ImageFile
+import PIL
 import torch
 import torchvision
+import torch.distributed as dist
+import time
+# from comet_ml import Experiment
 
 import numpy as np
 from tqdm import tqdm
@@ -29,6 +33,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from torch import linalg as LA
 from sklearn.mixture import GaussianMixture
+import wandb
 
 try:
     from apex import amp
@@ -41,283 +46,13 @@ from models.Unet import Unet, EMA
 
 
 LOG = logging.getLogger(__name__)
-
-# helpers functions
-
-# def exists(x):
-#     return x is not None
-
-# def default(val, d):
-#     if exists(val):
-#         return val
-#     return d() if isfunction(d) else d
-
-# def cycle(dl):
-#     while True:
-#         for data in dl:
-#             yield data
-
-# def num_to_groups(num, divisor):
-#     groups = num // divisor
-#     remainder = num % divisor
-#     arr = [divisor] * groups
-#     if remainder > 0:
-#         arr.append(remainder)
-#     return arr
-
-# def loss_backwards(fp16, loss, optimizer, **kwargs):
-#     if fp16:
-#         with amp.scale_loss(loss, optimizer) as scaled_loss:
-#             scaled_loss.backward(**kwargs)
-#     else:
-#         loss.backward(**kwargs)
-
-# small helper modules
-
-# class EMA():
-#     def __init__(self, beta):
-#         super().__init__()
-#         self.beta = beta
-
-#     def update_model_average(self, ma_model, current_model):
-#         for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
-#             old_weight, up_weight = ma_params.data, current_params.data
-#             ma_params.data = self.update_average(old_weight, up_weight)
-
-#     def update_average(self, old, new):
-#         if old is None:
-#             return new
-#         return old * self.beta + (1 - self.beta) * new
-
-# class Residual(nn.Module):
-#     def __init__(self, fn):
-#         super().__init__()
-#         self.fn = fn
-
-#     def forward(self, x, *args, **kwargs):
-#         return self.fn(x, *args, **kwargs) + x
-
-# class SinusoidalPosEmb(nn.Module):
-#     def __init__(self, dim):
-#         super().__init__()
-#         self.dim = dim
-
-#     def forward(self, x):
-#         device = x.device
-#         half_dim = self.dim // 2
-#         emb = math.log(10000) / (half_dim - 1)
-#         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-#         emb = x[:, None] * emb[None, :]
-#         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-#         return emb
-
-# def Upsample(dim):
-#     return nn.ConvTranspose2d(dim, dim, 4, 2, 1)
-
-# def Downsample(dim):
-#     return nn.Conv2d(dim, dim, 4, 2, 1)
-
-# class LayerNorm(nn.Module):
-#     def __init__(self, dim, eps = 1e-5):
-#         super().__init__()
-#         self.eps = eps
-#         self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
-#         self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
-
-#     def forward(self, x):
-#         var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
-#         mean = torch.mean(x, dim = 1, keepdim = True)
-#         return (x - mean) / (var + self.eps).sqrt() * self.g + self.b
-
-# class PreNorm(nn.Module):
-#     def __init__(self, dim, fn):
-#         super().__init__()
-#         self.fn = fn
-#         self.norm = LayerNorm(dim)
-
-#     def forward(self, x):
-#         x = self.norm(x)
-#         return self.fn(x)
-
-# # building block modules
-
-# class ConvNextBlock(nn.Module):
-#     """ https://arxiv.org/abs/2201.03545 """
-
-#     def __init__(self, dim, dim_out, *, time_emb_dim = None, mult = 2, norm = True):
-#         super().__init__()
-#         self.mlp = nn.Sequential(
-#             nn.GELU(),
-#             nn.Linear(time_emb_dim, dim)
-#         ) if exists(time_emb_dim) else None
-
-#         self.ds_conv = nn.Conv2d(dim, dim, 7, padding = 3, groups = dim)
-
-#         self.net = nn.Sequential(
-#             LayerNorm(dim) if norm else nn.Identity(),
-#             nn.Conv2d(dim, dim_out * mult, 3, padding = 1),
-#             nn.GELU(),
-#             nn.Conv2d(dim_out * mult, dim_out, 3, padding = 1)
-#         )
-
-#         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
-
-#     def forward(self, x, time_emb = None):
-#         h = self.ds_conv(x)
-
-#         if exists(self.mlp):
-#             assert exists(time_emb), 'time emb must be passed in'
-#             condition = self.mlp(time_emb)
-#             h = h + rearrange(condition, 'b c -> b c 1 1')
-
-#         h = self.net(h)
-#         return h + self.res_conv(x)
-
-# class LinearAttention(nn.Module):
-#     def __init__(self, dim, heads = 4, dim_head = 32):
-#         super().__init__()
-#         self.scale = dim_head ** -0.5
-#         self.heads = heads
-#         hidden_dim = dim_head * heads
-#         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
-#         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
-
-#     def forward(self, x):
-#         b, c, h, w = x.shape
-#         qkv = self.to_qkv(x).chunk(3, dim = 1)
-#         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
-#         q = q * self.scale
-
-#         k = k.softmax(dim = -1)
-#         context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
-
-#         out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
-#         out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)
-#         return self.to_out(out)
-
-# # model
-
-# class Unet(nn.Module):
-#     def __init__(
-#         self,
-#         dim,
-#         out_dim = None,
-#         dim_mults=(1, 2, 4, 8),
-#         channels = 3,
-#         with_time_emb = True,
-#         residual = False
-#     ):
-#         super().__init__()
-#         self.channels = channels
-#         self.residual = residual
-#         print("Is Time embed used ? ", with_time_emb)
-
-#         dims = [channels, *map(lambda m: dim * m, dim_mults)]
-#         in_out = list(zip(dims[:-1], dims[1:]))
-
-#         if with_time_emb:
-#             time_dim = dim
-#             self.time_mlp = nn.Sequential(
-#                 SinusoidalPosEmb(dim),
-#                 nn.Linear(dim, dim * 4),
-#                 nn.GELU(),
-#                 nn.Linear(dim * 4, dim)
-#             )
-#         else:
-#             time_dim = None
-#             self.time_mlp = None
-
-#         self.downs = nn.ModuleList([])
-#         self.ups = nn.ModuleList([])
-#         num_resolutions = len(in_out)
-
-#         for ind, (dim_in, dim_out) in enumerate(in_out):
-#             is_last = ind >= (num_resolutions - 1)
-
-#             self.downs.append(nn.ModuleList([
-#                 ConvNextBlock(dim_in, dim_out, time_emb_dim = time_dim, norm = ind != 0),
-#                 ConvNextBlock(dim_out, dim_out, time_emb_dim = time_dim),
-#                 Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-#                 Downsample(dim_out) if not is_last else nn.Identity()
-#             ]))
-
-#         mid_dim = dims[-1]
-#         self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
-#         self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
-#         self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
-
-#         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
-#             is_last = ind >= (num_resolutions - 1)
-
-#             self.ups.append(nn.ModuleList([
-#                 ConvNextBlock(dim_out * 2, dim_in, time_emb_dim = time_dim),
-#                 ConvNextBlock(dim_in, dim_in, time_emb_dim = time_dim),
-#                 Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-#                 Upsample(dim_in) if not is_last else nn.Identity()
-#             ]))
-
-#         out_dim = default(out_dim, channels)
-#         self.final_conv = nn.Sequential(
-#             ConvNextBlock(dim, dim),
-#             nn.Conv2d(dim, out_dim, 1)
-#         )
-
-#     def forward(self, x, time):
-#         orig_x = x
-#         t = self.time_mlp(time) if exists(self.time_mlp) else None
-
-#         h = []
-
-#         for convnext, convnext2, attn, downsample in self.downs:
-#             x = convnext(x, t)
-#             x = convnext2(x, t)
-#             x = attn(x)
-#             h.append(x)
-#             x = downsample(x)
-
-#         x = self.mid_block1(x, t)
-#         x = self.mid_attn(x)
-#         x = self.mid_block2(x, t)
-
-#         for convnext, convnext2, attn, upsample in self.ups:
-#             x = torch.cat((x, h.pop()), dim=1)
-#             x = convnext(x, t)
-#             x = convnext2(x, t)
-#             x = attn(x)
-#             x = upsample(x)
-#         if self.residual:
-#             return self.final_conv(x) + orig_x
-
-#         return self.final_conv(x)
-
-# # gaussian diffusion trainer class
-
-# def extract(a, t, x_shape):
-#     b, *_ = t.shape
-#     out = a.gather(-1, t)
-#     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
-
-# def noise_like(shape, device, repeat=False):
-#     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
-#     noise = lambda: torch.randn(shape, device=device)
-#     return repeat_noise() if repeat else noise()
-
-# def cosine_beta_schedule(timesteps, s = 0.008):
-#     """
-#     cosine schedule
-#     as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
-#     """
-#     steps = timesteps + 1
-#     x = torch.linspace(0, steps, steps)
-#     alphas_cumprod = torch.cos(((x / steps) + s) / (1 + s) * torch.pi * 0.5) ** 2
-#     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-#     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-#     return torch.clip(betas, 0, 0.999)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 class GaussianDiffusion(nn.Module):
     def __init__(self, denoise_fn, cfg):
         super().__init__()
         self.cfg = cfg
+        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
         self.channels = self.cfg.trainer.diffusion.channels
         self.image_size = self.cfg.trainer.diffusion.image_size
         self.denoise_fn = denoise_fn
@@ -329,7 +64,8 @@ class GaussianDiffusion(nn.Module):
         self.gpu = self.cfg.trainer.gpu
         betas = cosine_beta_schedule(self.num_timesteps)
         alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
+        
+        alphas_cumprod = torch.cumprod(torch.from_numpy(alphas), axis=0)
 
         self.register_buffer('alphas_cumprod', alphas_cumprod)
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
@@ -337,15 +73,24 @@ class GaussianDiffusion(nn.Module):
 
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, img=None, t=None):
-
+    def sample(self, batch_size = 16, img = None, noise = None,  t=None):
+        
         self.denoise_fn.eval()
+
         if t == None:
             t = self.num_timesteps
+        elif t < 2:
+            LOG.info(f"timesteps changed to 3 per default.")
+            t = 3
+
+        img1 = img
+        img2 = noise
+        with torch.no_grad():
+            step = torch.full((batch_size,), int((t-2)/2), dtype=torch.long, device=img1.device)
+            img = self.q_sample(x_start=img1, x_end=img2, t=step)
 
         xt = img
         direct_recons = None
-
         while (t):
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda(self.gpu)
             x1_bar = self.denoise_fn(img, step)
@@ -364,12 +109,12 @@ class GaussianDiffusion(nn.Module):
                 xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
 
             x = img - xt_bar + xt_sub1_bar
+            
             img = x
             t = t - 1
-
         self.denoise_fn.train()
 
-        return xt, direct_recons, img
+        return xt, direct_recons, img, x2_bar
 
     def get_x2_bar_from_xt(self, x1_bar, xt, t):
         return (
@@ -417,13 +162,10 @@ class GaussianDiffusion(nn.Module):
         if t == None:
             t = self.num_timesteps
 
-
         img = img1
-
+        noise = img2
         Forward = []
         Forward.append(img)
-
-        noise = img2
 
         for i in range(t):
             with torch.no_grad():
@@ -502,13 +244,21 @@ class GaussianDiffusion(nn.Module):
         b, c, h, w = x_start.shape
         if self.train_routine == 'Final':
             x_mix = self.q_sample(x_start=x_start, x_end=x_end, t=t)
-            x_recon = self.denoise_fn(x_mix, t)
+            LOG.debug(f"x_mix, {x_mix.dtype}")
+            # x_mix_save  = (x_mix + 1) * 0.5
+            # utils.save_image(x_mix_save, str(self.cfg.trainer.results_folder + '/' + f'x_mix_save-{1}.png'), nrow=6)
+            # try:
+            #     wandb.log({f"x_mix_{1}": wandb.Image(str(self.cfg.trainer.results_folder + '/' + f'x_mix_save-{1}.png'))})
+            # except:
+            #     pass
+            # raise NotImplementedError
+            x_recon = self.denoise_fn(x_mix.float(), t)
             if self.loss_type == 'l1':
                 loss = (x_start - x_recon).abs().mean()
             elif self.loss_type == 'l2':
                 loss = F.mse_loss(x_start, x_recon)
             else:
-                raise NotImplementedError()
+                raise NotImplementedError
 
         return loss
 
@@ -598,8 +348,11 @@ class Trainer(object):
     def __init__(self, diffusion_model, cfg, writer):
         super().__init__()
         self.cfg = cfg
+        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
         self.folder1 = self.cfg.dataset.folder1
         self.folder2 = self.cfg.dataset.folder2
+        self.folder1_test = self.cfg.dataset.folder1_test
+        self.folder2_test = self.cfg.dataset.folder2_test
         self.ema_decay = self.cfg.trainer.ema_decay
         self.image_size = self.cfg.trainer.image_size
         self.batch_size = self.cfg.trainer.train_batch_size
@@ -613,31 +366,45 @@ class Trainer(object):
         self.results_folder = self.cfg.trainer.results_folder
         self.load_path = self.cfg.trainer.checkpointpath
         self.dataset = self.cfg.dataset.name
+        self.mode = self.cfg.dataset.mode
         self.writer = writer
+        self.gpu = self.cfg.trainer.gpu
     
         self.model = diffusion_model
         self.ema = EMA(self.ema_decay)
         self.ema_model = copy.deepcopy(self.model)
 
-        if self.dataset == 'train':
+        if self.mode == 'train':
             LOG.info(f"{self.dataset} DA used")
             self.ds1 = Dataset_Aug1(self.folder1, self.image_size)
-            self.ds2 = Dataset_Aug1(self.folder2, self.image_size)
+            self.ds2 = Dataset_Aug1(self.folder2, self.image_size)  
         else:
             LOG.info(f"dataset {self.dataset}")
             self.ds1 = Dataset(self.folder1, self.image_size)
             self.ds2 = Dataset(self.folder2, self.image_size)
-
-        self.sampler1 = DistributedSampler(self.ds1, num_replicas=self.cfg.trainer.world_size, rank=self.cfg.trainer.rank)
-        self.sampler2 =DistributedSampler(self.ds2, num_replicas=self.cfg.trainer.world_size, rank=self.cfg.trainer.rank)
+        
+        self.sampler1 = DistributedSampler(self.ds1, num_replicas=self.cfg.trainer.world_size, seed = self.cfg.trainer.seed,  rank=self.cfg.trainer.rank)
+        self.sampler2 = DistributedSampler(self.ds2, num_replicas=self.cfg.trainer.world_size,seed = self.cfg.trainer.seed + 1, rank=self.cfg.trainer.rank)
         self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = self.batch_size, sampler=self.sampler1, pin_memory=True, num_workers=16, drop_last=True))
         self.dl2 = cycle(data.DataLoader(self.ds2, batch_size=self.batch_size, sampler=self.sampler2, pin_memory=True, num_workers=16, drop_last=True))
+
+        if self.mode == "train":
+            self.ds1_test = Dataset(self.folder1_test, self.image_size)
+            self.ds2_test = Dataset(self.folder2_test, self.image_size)
+            self.sampler1_test = DistributedSampler(self.ds1_test, num_replicas=self.cfg.trainer.world_size, seed = self.cfg.trainer.seed,  rank=self.cfg.trainer.rank)
+            self.sampler2_test = DistributedSampler(self.ds2_test, num_replicas=self.cfg.trainer.world_size,seed = self.cfg.trainer.seed + 1, rank=self.cfg.trainer.rank)
+            self.dl1_test = cycle(data.DataLoader(self.ds1_test, batch_size = self.batch_size, sampler=self.sampler1_test, pin_memory=True, num_workers=16, drop_last=True))
+            self.dl2_test = cycle(data.DataLoader(self.ds2_test, batch_size=self.batch_size, sampler=self.sampler2_test, pin_memory=True, num_workers=16, drop_last=True))
 
         self.opt = Adam(diffusion_model.parameters(), lr=self.train_lr)
         self.step = 0
 
         self.results_folder = Path(self.results_folder)
         self.results_folder.mkdir(exist_ok = True)
+
+        for mode in ['Test', 'Train']:
+            folder = Path(str(self.results_folder / f'{mode}'))
+            folder.mkdir(exist_ok = True)
 
         self.fp16 = self.fp16
 
@@ -697,11 +464,38 @@ class Trainer(object):
         cv2.putText(vcat, str(title), (violet.shape[1] // 2, height-2), font, 0.5, (0, 0, 0), 1, 0)
         cv2.imwrite(path, vcat)
 
+    def save_image_and_log(self,og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train'):
+        og_img1 = (og_img1 + 1) * 0.5
+        utils.save_image(og_img1, str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'), nrow=6)
 
+        og_img2 = (og_img2 + 1) * 0.5
+        utils.save_image(og_img2, str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'), nrow=6)
+
+        all_images = (all_images + 1) * 0.5
+        utils.save_image(all_images, str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'), nrow = 6)
+
+        direct_recons = (direct_recons + 1) * 0.5
+        utils.save_image(direct_recons, str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'), nrow=6)
+
+        xt = (xt + 1) * 0.5
+        utils.save_image(xt, str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'),nrow=6)
+
+        noise_image = (noise_image + 1) * 0.5
+        utils.save_image(noise_image, str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'), nrow=6)
+        time.sleep(1)
+        if self.cfg.trainer.gpu == 0:
+            LOG.info("Logging image")
+            wandb.log({f"{mode}/target_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'))})
+            wandb.log({f"{mode}/noise_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
+            wandb.log({f"{mode}/full_reconstruction{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'))})
+            wandb.log({f"{mode}/direct_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'))})
+            wandb.log({f"{mode}/xt_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'))})
+            wandb.log({f"{mode}/noise_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
+                
 
     def train(self):
-        experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
-                                project_name="Cold_Diffusion_Cycle")
+        # experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
+        #                         project_name="Cold_Diffusion_Cycle")
 
         backwards = partial(loss_backwards, self.fp16)
 
@@ -709,14 +503,15 @@ class Trainer(object):
         while self.step < self.train_num_steps:
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
-                data_1 = next(self.dl1).cuda()
-                data_2 = next(self.dl2).cuda()
+                data_1 = next(self.dl1).cuda(self.cfg.trainer.gpu)
+                data_2 = next(self.dl2).cuda(self.cfg.trainer.gpu)
                 loss = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
-                    print(f'{self.step}: {loss.item()}')
+                    LOG.info(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
-
+                if self.writer is not None:
+                    self.writer.add_scalar("Train/Loss", loss.item(), self.step)
             acc_loss = acc_loss + (u_loss/self.gradient_accumulate_every)
 
             self.opt.step()
@@ -726,28 +521,52 @@ class Trainer(object):
                 self.step_ema()
 
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                experiment.log_current_epoch(self.step)
+                # experiment.log_current_epoch(self.step)
+                dist.barrier()
                 milestone = self.step // self.save_and_sample_every
                 batches = self.batch_size
-                og_img = next(self.dl2).cuda()
+                # og_img = next(self.dl2).cuda(self.cfg.trainer.gpu).float()
+                og_img1 = next(self.dl1).cuda(self.gpu)
+                og_img2 = next(self.dl2).cuda(self.gpu)
+                xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=og_img1, noise = og_img2)
+                self.save_image_and_log(og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train')
+                if self.mode == "train":
+                    test_img1 = next(self.dl1).cuda(self.gpu)
+                    test_img2 = next(self.dl2).cuda(self.gpu)
+                    test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=test_img1, noise = test_img2)
+                    self.save_image_and_log(test_img1, test_img2, test_all_images, test_direct_recons, test_xt, test_noise_image, milestone, mode = 'Test')
+                # Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img1=og_img1, img2=og_img2)
+                
+                
+                # og_img1 = (og_img1 + 1) * 0.5
+                # utils.save_image(og_img1, str(self.results_folder / f'sample-og1-{milestone}.png'), nrow=6)
 
-                xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
+                # og_img2 = (og_img2 + 1) * 0.5
+                # utils.save_image(og_img2, str(self.results_folder / f'sample-og2-{milestone}.png'), nrow=6)
 
-                og_img = (og_img + 1) * 0.5
-                utils.save_image(og_img, str(self.results_folder / f'sample-og-{milestone}.png'), nrow=6)
+                # all_images = (all_images + 1) * 0.5
+                # utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
 
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
+                # direct_recons = (direct_recons + 1) * 0.5
+                # utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
 
-                direct_recons = (direct_recons + 1) * 0.5
-                utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
+                # xt = (xt + 1) * 0.5
+                # utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),nrow=6)
 
-                xt = (xt + 1) * 0.5
-                utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
-                                 nrow=6)
-
+                # noise_image = (noise_image + 1) * 0.5
+                # utils.save_image(noise_image, str(self.results_folder / f'noise_image_recons-{milestone}.png'), nrow=6)
+                # time.sleep(1)
+                # if self.cfg.trainer.gpu == 0:
+                #     LOG.info("Logging image")
+                #     wandb.log({f"target_sample_{self.step}": wandb.Image(str(self.results_folder / f'sample-og1-{milestone}.png'))})
+                #     wandb.log({f"noise_sample_{self.step}": wandb.Image(str(self.results_folder / f'sample-og2-{milestone}.png'))})
+                #     wandb.log({f"full_reconstruction{self.step}": wandb.Image(str(self.results_folder / f'sample-recon-{milestone}.png'))})
+                #     wandb.log({f"direct_reconstruction_{self.step}": wandb.Image(str(self.results_folder / f'sample-direct_recons-{milestone}.png'))})
+                #     wandb.log({f"xt_{self.step}": wandb.Image(str(self.results_folder / f'sample-xt-{milestone}.png'))})
+                #     wandb.log({f"noise_reconstruction_{self.step}": wandb.Image(str(self.results_folder / f'noise_image_recons-{milestone}.png'))})
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
-                experiment.log_metric("Training Loss", acc_loss, step=self.step)
+                # experiment.log_metric("Training Loss", acc_loss, step=self.step)
+                dist.barrier()
                 print(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss=0
 

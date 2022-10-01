@@ -5,7 +5,7 @@ import logging
 from utils_metrics.utils import exists, default, cycle, cycle_cat, num_to_groups, loss_backwards
 from inspect import isfunction
 from einops import rearrange
-
+import os
 LOG = logging.getLogger(__name__)
 
 
@@ -135,6 +135,7 @@ class LinearAttention(nn.Module):
 class Unet(nn.Module):
     def __init__(self,cfg):
         super().__init__()
+        LOG.setLevel(os.environ.get("LOGLEVEL", cfg.trainer.log_level))
         dim = cfg.trainer.model.dim
         out_dim = cfg.trainer.model.out_dim
         dim_mults = cfg.trainer.model.dim_mults #(1, 2, 4, 8),
@@ -195,12 +196,14 @@ class Unet(nn.Module):
         )
 
     def forward(self, x, time):
-        orig_x = x
+        orig_x = x.float()
+        x = x.float()
         t = self.time_mlp(time) if exists(self.time_mlp) else None
 
         h = []
 
         for convnext, convnext2, attn, downsample in self.downs:
+            LOG.debug(f"x , {x.dtype}, t {t}")
             x = convnext(x, t)
             x = convnext2(x, t)
             x = attn(x)

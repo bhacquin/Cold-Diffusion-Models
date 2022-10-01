@@ -3,7 +3,7 @@ defaults:
   - trainer: base_trainer
   # - override hydra/job_logging: custom
   # - override hydra/help: clearaudio_help
-  # - _self_
+  - _self_
 
 
 hydra:

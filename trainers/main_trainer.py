@@ -7,6 +7,7 @@ from torch.nn.parallel import DistributedDataParallel
 import torch.distributed as dist
 from trainers.base_trainer import BaseTrainer
 from models.Unet import Unet , EMA
+
 LOG = logging.getLogger(__name__)
 
 class MainTrainer(BaseTrainer):
@@ -14,6 +15,8 @@ class MainTrainer(BaseTrainer):
         super().__init__(cfg)
         global GaussianDiffusion
         global Trainer
+   
+        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
         LOG.info(f"Diffusion type : {cfg.trainer.diffusion.type}")
         if cfg.trainer.diffusion.type == "deblur" :
             from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
@@ -38,7 +41,7 @@ class MainTrainer(BaseTrainer):
         pass
 
     def setup_trainer(self) -> None:
-        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
+       
         # Instantiate the model and optimizer
         self.model = Unet(self.cfg)          
         self.diffusion = GaussianDiffusion(self.model, self.cfg)

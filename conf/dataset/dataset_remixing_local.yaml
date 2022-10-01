@@ -1,0 +1,14 @@
+defaults:
+  - base_dataset
+name: celebA
+mode: train
+folder1: root_celebA_128_train_new/
+folder2: root_celebA_128_train_new/
+
+folder1_test: root_celebA_128_test_new/
+folder2_test: root_celebA_128_test_new/
+
+
+
+
+
