@@ -162,7 +162,7 @@ class BaseTrainer(object):
 
     def setup_slurm(self) -> None:
         # torchaudio.set_audio_backend("soundfile")
-        torchaudio.set_audio_backend("sox_io")
+        # torchaudio.set_audio_backend("sox_io")
         job_env = submitit.JobEnvironment()
         with open_dict(self.cfg):
             self.cfg.trainer.job_id = job_env.job_id

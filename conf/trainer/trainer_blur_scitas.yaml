@@ -53,11 +53,11 @@ model:
 
 # Mode slurm
 slurm:
-  nodes: 1 # 2
-  gpus_per_node: 1  # max 2
-  cpus_per_task: 10
+  nodes: 2 # 2
+  gpus_per_node: 2  # max 2
+  cpus_per_task: 12
   mem: 0 # in GiB 48
-  timeout: 48 # hours
+  timeout: 72 # hours
   partition: gpu
   qos: gpu
   account: vita # optional
