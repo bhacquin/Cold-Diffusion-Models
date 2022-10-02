@@ -6,7 +6,7 @@ platform: local
 
 log_level: INFO
 results_folder: ${trainer.results_dir}/${trainer.name}_${dataset.name}
-checkpointpath: 
+checkpointpath: /home/bastienvandelft/Projects/Cold-Diffusion-Models/results/remixing_diffusion_celebA/Remixing_faces_2022-10-01_14-29/model.pt
 seed: 42
 #### Tracker
 use_clearml: false 
@@ -25,7 +25,7 @@ gradient_accumulate_every: 1
 fp16: false
 step_start_ema: 2000
 update_ema_every: 10
-save_and_sample_every: 1000
+save_and_sample_every: 10000
 
 #### Diffusion params
 diffusion:

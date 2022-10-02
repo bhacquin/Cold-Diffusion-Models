@@ -42,7 +42,9 @@ except:
     APEX_AVAILABLE = False
 
 from utils_metrics.utils import exists, default, cycle, cycle_cat, num_to_groups, loss_backwards, extract, noise_like, cosine_beta_schedule
+from utils_metrics.fid_score import calculate_fid_given_samples
 from models.Unet import Unet, EMA
+
 
 
 LOG = logging.getLogger(__name__)
@@ -461,33 +463,35 @@ class Trainer(object):
         cv2.imwrite(path, vcat)
 
     def save_image_and_log(self,og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train'):
-        og_img1 = (og_img1 + 1) * 0.5
-        utils.save_image(og_img1, str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'), nrow=6)
+        try:
+            og_img1 = (og_img1 + 1) * 0.5
+            utils.save_image(og_img1, str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'), nrow=6)
 
-        og_img2 = (og_img2 + 1) * 0.5
-        utils.save_image(og_img2, str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'), nrow=6)
+            og_img2 = (og_img2 + 1) * 0.5
+            utils.save_image(og_img2, str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'), nrow=6)
 
-        all_images = (all_images + 1) * 0.5
-        utils.save_image(all_images, str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'), nrow = 6)
+            all_images = (all_images + 1) * 0.5
+            utils.save_image(all_images, str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'), nrow = 6)
 
-        direct_recons = (direct_recons + 1) * 0.5
-        utils.save_image(direct_recons, str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'), nrow=6)
+            direct_recons = (direct_recons + 1) * 0.5
+            utils.save_image(direct_recons, str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'), nrow=6)
 
-        xt = (xt + 1) * 0.5
-        utils.save_image(xt, str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'),nrow=6)
+            xt = (xt + 1) * 0.5
+            utils.save_image(xt, str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'),nrow=6)
 
-        noise_image = (noise_image + 1) * 0.5
-        utils.save_image(noise_image, str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'), nrow=6)
-        time.sleep(1)
-        if self.cfg.trainer.gpu == 0:
+            noise_image = (noise_image + 1) * 0.5
+            utils.save_image(noise_image, str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'), nrow=6)
+            time.sleep(1)
+            
             LOG.info("Logging image")
-            wandb.log({f"{mode}/target_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'))})
-            wandb.log({f"{mode}/noise_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
-            wandb.log({f"{mode}/full_reconstruction{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'))})
-            wandb.log({f"{mode}/direct_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'))})
-            wandb.log({f"{mode}/xt_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'))})
-            wandb.log({f"{mode}/noise_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
-                
+            wandb.log({f"{mode}_img/target_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'))})
+            wandb.log({f"{mode}_img/noise_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
+            wandb.log({f"{mode}_img/full_reconstruction{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'))})
+            wandb.log({f"{mode}_img/direct_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'))})
+            wandb.log({f"{mode}_img/xt_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'))})
+            wandb.log({f"{mode}_img/noise_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
+        except:
+            LOG.error(f"Issue when logging images for {milestone}")        
 
     def train(self):
         # experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
@@ -522,27 +526,28 @@ class Trainer(object):
                 milestone = self.step // self.save_and_sample_every
                 batches = self.batch_size
                 # og_img = next(self.dl2).cuda(self.cfg.trainer.gpu).float()
-                og_img1 = next(self.dl1).cuda(self.gpu)
-                og_img2 = next(self.dl2).cuda(self.gpu)
-                with torch.no_grad():
-                    step = torch.full((batch_size,), int((self.num_timesteps-2)/2), dtype=torch.long, device=og_img1.device)
-                    img = self.q_sample(x_start=og_img1, x_end=og_img2, t=step)
-                xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=img)
-                self.save_image_and_log(og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train')
-                if self.mode == "train":
-                    test_img1 = next(self.dl1).cuda(self.gpu)
-                    test_img2 = next(self.dl2).cuda(self.gpu)
+                if self.cfg.trainer.gpu == 0:
+                    og_img1 = next(self.dl1).cuda(self.gpu)
+                    og_img2 = next(self.dl2).cuda(self.gpu)
                     with torch.no_grad():
-                        step = torch.full((batch_size,), int((self.num_timesteps-2)/2), dtype=torch.long, device=test_img1.device)
-                        img = self.q_sample(x_start=test_img1, x_end=test_img2, t=step)
-                    test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=img)
-                    self.save_image_and_log(test_img1, test_img2, test_all_images, test_direct_recons, test_xt, test_noise_image, milestone, mode = 'Test')
+                        step = torch.full((self.batch_size,), int((self.cfg.trainer.diffusion.timesteps-2)/2), dtype=torch.long, device=og_img1.device)
+                        img = self.model.module.q_sample(x_start=og_img1, x_end=og_img2, t=step)
+                    xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=img)
+                    self.save_image_and_log(og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train')
+                    if self.mode == "train":
+                        test_img1 = next(self.dl1).cuda(self.gpu)
+                        test_img2 = next(self.dl2).cuda(self.gpu)
+                        with torch.no_grad():
+                            step = torch.full((self.batch_size,), int((self.cfg.trainer.diffusion.timesteps-2)/2), dtype=torch.long, device=test_img1.device)
+                            test_img = self.model.module.q_sample(x_start=test_img1, x_end=test_img2, t=step)
+                        test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=test_img)
+                        self.save_image_and_log(test_img1, test_img2, test_all_images, test_direct_recons, test_xt, test_noise_image, milestone, mode = 'Test')
                 # Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img1=og_img1, img2=og_img2)
                 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
                 # experiment.log_metric("Training Loss", acc_loss, step=self.step)
                 dist.barrier()
-                print(f'Mean of last {self.step}: {acc_loss}')
+                LOG.info(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss=0
 
                 self.save()
@@ -551,7 +556,7 @@ class Trainer(object):
 
             self.step += 1
 
-        print('training completed')
+        LOG.info('training completed')
 
     def test_from_data(self, extra_path, s_times=None):
         batches = self.batch_size
