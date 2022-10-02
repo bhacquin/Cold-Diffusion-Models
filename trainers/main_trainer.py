@@ -18,7 +18,9 @@ class MainTrainer(BaseTrainer):
    
         LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
         LOG.info(f"Diffusion type : {cfg.trainer.diffusion.type}")
+        print(cfg.trainer.diffusion.type)
         if cfg.trainer.diffusion.type == "deblur" :
+            print("loaded GaussianDiffusion from deblur")
             from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'decolor':
             raise NotImplementedError
@@ -26,7 +28,7 @@ class MainTrainer(BaseTrainer):
         elif cfg.trainer.diffusion.type == 'defade_gaussian':
             from trainers.defading_diffusion_gaussian import  GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'defade_generate':
-            from trainers.defading_generation_diffusion_pytorch import  GaussianDiffusion, Trainer
+            from trainers.defading_diffusion_pytorch import  GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'demix':
             from trainers.demixing_diffusion_pytorch import GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'denoise':
@@ -41,7 +43,26 @@ class MainTrainer(BaseTrainer):
         pass
 
     def setup_trainer(self) -> None:
-       
+        global GaussianDiffusion
+        global Trainer
+        if self.cfg.trainer.diffusion.type == "deblur" :
+            print("loaded GaussianDiffusion from deblur")
+            from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
+        elif self.cfg.trainer.diffusion.type == 'decolor':
+            raise NotImplementedError
+            from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
+        elif self.cfg.trainer.diffusion.type == 'defade_gaussian':
+            from trainers.defading_diffusion_gaussian import  GaussianDiffusion, Trainer
+        elif self.cfg.trainer.diffusion.type == 'defade_generate':
+            from trainers.defading_diffusion_pytorch import  GaussianDiffusion, Trainer
+        elif self.cfg.trainer.diffusion.type == 'demix':
+            from trainers.demixing_diffusion_pytorch import GaussianDiffusion, Trainer
+        elif self.cfg.trainer.diffusion.type == 'denoise':
+            from trainers.denoising_diffusion_pytorch import GaussianDiffusion, Trainer
+        elif self.cfg.trainer.diffusion.type == 'resolution':
+            from trainers.resolution_diffusion_pytorch import GaussianDiffusion, Trainer
+        else:
+            raise NotImplementedError
         # Instantiate the model and optimizer
         self.model = Unet(self.cfg)          
         self.diffusion = GaussianDiffusion(self.model, self.cfg)

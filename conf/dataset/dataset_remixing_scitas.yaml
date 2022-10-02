@@ -1,8 +1,11 @@
 defaults:
   - base_dataset
 name: celebA
+name2: imagenet
 folder1: /work/scitas/bastien/root_celebA_128_train_new/
-folder2: AFHQ/afhq/train/
+folder2: /work/vita/datasets/imagenet128/train
+folder1_test: /work/scitas/bastien/root_celebA_128_test_new/
+folder2_test: /work/scitas/bastien/root_celebA_128_test_new/
 
 
 
