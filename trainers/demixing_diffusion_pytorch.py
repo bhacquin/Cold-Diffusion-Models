@@ -498,7 +498,6 @@ class Trainer(object):
         #                         project_name="Cold_Diffusion_Cycle")
 
         backwards = partial(loss_backwards, self.fp16)
-
         acc_loss = 0
         while self.step < self.train_num_steps:
             u_loss = 0

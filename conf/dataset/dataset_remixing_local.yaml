@@ -3,7 +3,7 @@ defaults:
 name: celebA
 mode: train
 folder1: root_celebA_128_train_new/
-folder2: root_celebA_128_train_new/
+folder2: root_celebA_128_train_new/  #/mnt/scitas/datasets/imagenet128/train/box/n02056570/
 
 folder1_test: root_celebA_128_test_new/
 folder2_test: root_celebA_128_test_new/

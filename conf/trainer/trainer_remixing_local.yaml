@@ -6,7 +6,7 @@ platform: local
 
 log_level: INFO
 results_folder: ${trainer.results_dir}/${trainer.name}_${dataset.name}
-checkpointpath: /home/bastienvandelft/Projects/Cold-Diffusion-Models/results/remixing_diffusion_celebA/Remixing_faces_2022-10-01_14-29/model.pt
+checkpointpath: 
 seed: 42
 #### Tracker
 use_clearml: false 
@@ -33,7 +33,7 @@ diffusion:
   device_of_kernel: cuda
   image_size: 128
   channels: 3
-  timesteps: 200   # number of steps
+  timesteps: 1000   # number of steps
   loss_type: l1
   # kernel_std: 0.15
   # kernel_size: 3           
