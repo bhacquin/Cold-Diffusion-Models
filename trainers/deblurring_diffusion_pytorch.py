@@ -829,6 +829,7 @@ class Trainer(object):
             self.dl = cycle(data.DataLoader(self.ds, batch_size=self.batch_size, sampler = self.sampler, pin_memory=True, num_workers=16,
                                 drop_last=True))
 
+        print(f"Train Dataset 1 with {len(self.ds)} samples")
         self.opt = Adam(diffusion_model.parameters(), lr=self.train_lr)
         self.step = 0
 

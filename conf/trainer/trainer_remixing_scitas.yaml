@@ -1,18 +1,18 @@
 defaults:
   - base_trainer
 
-name: blur_diffusion
+name: remixing_diffusion
 platform: slurm
 
 log_level: INFO
-results_folder: ./results
-checkpointpath: 
+results_folder: ${trainer.results_dir}/${trainer.name}_${dataset.name}
+checkpointpath: /home/bvandelft/Projects/Cold-Diffusion-Models/results/remixing_diffusion_celebA/Remixing_Imagenet_2022-10-03_01-00/model.pt
 seed: 42
 #### Tracker
 use_clearml: false 
 use_wandb: true
 wandb_entity: bastienvd
-ml_exp_name: Diffusion_Blur
+ml_exp_name: Remixing_Imagenet
 
 
 #### Trainer params
@@ -25,19 +25,18 @@ gradient_accumulate_every: 1
 fp16: false
 step_start_ema: 2000
 update_ema_every: 10
-save_and_sample_every: 500 
+save_and_sample_every: 10000
 
 #### Diffusion params
 diffusion:
-  type: deblur
+  type: demix
   device_of_kernel: cuda
   image_size: 128
   channels: 3
   timesteps: 1000   # number of steps
   loss_type: l1
-  kernel_std: 0.15
-  kernel_size: 3
-  blur_routine: Incremental             
+  # kernel_std: 0.15
+  # kernel_size: 3           
   train_routine: Final
   sampling_routine: x0_step_down
   discrete: false
@@ -55,8 +54,8 @@ model:
 slurm:
   nodes: 4 # 2
   gpus_per_node: 2  # max 2
-  cpus_per_task: 10
-  mem: 48 # in GiB 48
+  cpus_per_task: 20
+  mem: 100 # in GiB 48
   timeout: 72 # hours
   partition: gpu
   qos: gpu
