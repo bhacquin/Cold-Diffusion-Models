@@ -1,5 +1,5 @@
 name: generic_dataset
-mode: audioset
+mode: train
 
 dataset: to_fill
 

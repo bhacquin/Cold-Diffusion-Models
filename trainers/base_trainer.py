@@ -131,7 +131,7 @@ class BaseTrainer(object):
             if self.cfg.trainer.use_wandb:
                 wandb.init(project="Diffusion",entity=self.cfg.trainer.wandb_entity, sync_tensorboard=True)
                 wandb.run.name = self.cfg.trainer.ml_exp_name
-                wandb.run.save()
+                # wandb.run.save()
             self.writer = SummaryWriter()
 
     @abstractmethod
@@ -156,8 +156,8 @@ class BaseTrainer(object):
     # https://github.com/facebookincubator/submitit/blob/main/docs/checkpointing.md
     def __call__(self) -> None:
         self.setup_platform()
-        self.setup_trainer()
         self.setup_tracker()
+        self.setup_trainer()
         self.run()
 
     def setup_slurm(self) -> None:

@@ -46,7 +46,6 @@ class MainTrainer(BaseTrainer):
         global GaussianDiffusion
         global Trainer
         if self.cfg.trainer.diffusion.type == "deblur" :
-            print("loaded GaussianDiffusion from deblur")
             from trainers.deblurring_diffusion_pytorch import GaussianDiffusion, Trainer
         elif self.cfg.trainer.diffusion.type == 'decolor':
             raise NotImplementedError

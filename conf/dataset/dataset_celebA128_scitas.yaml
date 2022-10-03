@@ -1,5 +1,5 @@
 defaults:
   - base_dataset
 name: celebA
-folder: /work/scitas/bastien/root_celebA_128_train_new/
+folder: /work/vita/bastien/root_celebA_128_train_new/
 

@@ -271,7 +271,7 @@ class Dataset_Aug1(data.Dataset):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = [p for ext in exts for p in Path(f'{folder}').rglob(f'**/*.{ext}')]
 
         self.transform = transforms.Compose([
             transforms.Resize((int(image_size*1.12), int(image_size*1.12))),
@@ -295,7 +295,7 @@ class Dataset(data.Dataset):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = [p for ext in exts for p in Path(f'{folder}').rglob(f'**/*.{ext}')]
 
         self.transform = transforms.Compose([
             transforms.Resize((int(image_size*1.12), int(image_size*1.12))),
@@ -383,17 +383,21 @@ class Trainer(object):
         
         self.sampler1 = DistributedSampler(self.ds1, num_replicas=self.cfg.trainer.world_size, seed = self.cfg.trainer.seed,  rank=self.cfg.trainer.rank)
         self.sampler2 = DistributedSampler(self.ds2, num_replicas=self.cfg.trainer.world_size,seed = self.cfg.trainer.seed + 1, rank=self.cfg.trainer.rank)
-        self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = self.batch_size, sampler=self.sampler1, pin_memory=True, num_workers=16, drop_last=True))
-        self.dl2 = cycle(data.DataLoader(self.ds2, batch_size=self.batch_size, sampler=self.sampler2, pin_memory=True, num_workers=16, drop_last=True))
+        self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = self.batch_size, sampler=self.sampler1, pin_memory=True, num_workers=8, drop_last=True))
+        self.dl2 = cycle(data.DataLoader(self.ds2, batch_size=self.batch_size, sampler=self.sampler2, pin_memory=True, num_workers=8, drop_last=True))
 
         if self.mode == "train":
             self.ds1_test = Dataset(self.folder1_test, self.image_size)
             self.ds2_test = Dataset(self.folder2_test, self.image_size)
             self.sampler1_test = DistributedSampler(self.ds1_test, num_replicas=self.cfg.trainer.world_size, seed = self.cfg.trainer.seed,  rank=self.cfg.trainer.rank)
             self.sampler2_test = DistributedSampler(self.ds2_test, num_replicas=self.cfg.trainer.world_size,seed = self.cfg.trainer.seed + 1, rank=self.cfg.trainer.rank)
-            self.dl1_test = cycle(data.DataLoader(self.ds1_test, batch_size = self.batch_size, sampler=self.sampler1_test, pin_memory=True, num_workers=16, drop_last=True))
-            self.dl2_test = cycle(data.DataLoader(self.ds2_test, batch_size=self.batch_size, sampler=self.sampler2_test, pin_memory=True, num_workers=16, drop_last=True))
-
+            self.dl1_test = cycle(data.DataLoader(self.ds1_test, batch_size = self.batch_size, sampler=self.sampler1_test, pin_memory=True, num_workers=8, drop_last=True))
+            self.dl2_test = cycle(data.DataLoader(self.ds2_test, batch_size=self.batch_size, sampler=self.sampler2_test, pin_memory=True, num_workers=8, drop_last=True))
+            print(f"Test Dataset 1 with {len(self.ds1_test)} samples")
+            print(f"Test Dataset 2 with {len(self.ds2_test)} samples")
+        print(f"Train Dataset 1 with {len(self.ds1)} samples")
+        print(f"Train Dataset 2 with {len(self.ds2)} samples")
+        
         self.opt = Adam(diffusion_model.parameters(), lr=self.train_lr)
         self.step = 0
 
@@ -410,6 +414,7 @@ class Trainer(object):
 
         if self.load_path != None:
             self.load(self.load_path)
+        print("initialisation done...")
 
 
     def reset_parameters(self):
@@ -496,7 +501,7 @@ class Trainer(object):
     def train(self):
         # experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
         #                         project_name="Cold_Diffusion_Cycle")
-
+        print('started training')
         backwards = partial(loss_backwards, self.fp16)
         acc_loss = 0
         while self.step < self.train_num_steps:
@@ -506,6 +511,8 @@ class Trainer(object):
                 data_2 = next(self.dl2).cuda(self.cfg.trainer.gpu)
                 loss = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
+                    if self.cfg.trainer.platform == 'slurm':
+                        print(f'{self.step}: {loss.item()}')
                     LOG.info(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
