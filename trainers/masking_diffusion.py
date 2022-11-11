@@ -23,328 +23,35 @@ try:
 except:
     APEX_AVAILABLE = False
 
-
-def exists(x):
-    return x is not None
-
-
-def default(val, d):
-    if exists(val):
-        return val
-    return d() if isfunction(d) else d
-
-
-def cycle(dl):
-    while True:
-        for data in dl:
-            yield data
-
-import numpy as np
-
-def spiral_cw(A):
-    A = np.array(A)
-    out = []
-    while(A.size):
-        out.append(A[0])        # take first row
-        A = A[1:].T[::-1]       # cut off first row and rotate counterclockwise
-    return np.concatenate(out)
-
-
-def spiral_ccw(A):
-    A = np.array(A)
-    out = []
-    while(A.size):
-        out.append(A[0][::-1])    # first row reversed
-        A = A[1:][::-1].T         # cut off first row and rotate clockwise
-    return np.concatenate(out)
-
-def base_spiral(nrow, ncol):
-    return spiral_ccw(np.arange(nrow*ncol).reshape(nrow,ncol))[::-1]
-
-def to_spiral(A):
-    A = np.array(A)
-    B = np.empty_like(A)
-    B.flat[base_spiral(*A.shape)] = A.flat
-    return B
-
-def from_spiral(A):
-    A = np.array(A)
-    return A.flat[base_spiral(*A.shape)].reshape(A.shape)
-
-def to_spiral(A):
-    A = np.array(A)
-    B = np.empty_like(A)
-    B.flat[base_spiral(*A.shape)] = A.flat
-    return B
-
-def from_spiral(A):
-    A = np.array(A)
-    return A.flat[base_spiral(*A.shape)].reshape(A.shape)
-
-
-
-
-def loss_backwards(fp16, loss, optimizer, **kwargs):
-    if fp16:
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-            scaled_loss.backward(**kwargs)
-    else:
-        loss.backward(**kwargs)
-
-
-class EMA():
-    def __init__(self, beta):
-        super().__init__()
-        self.beta = beta
-
-    def update_model_average(self, ma_model, current_model):
-        for current_params, ma_params in zip(current_model.parameters(), ma_model.parameters()):
-            old_weight, up_weight = ma_params.data, current_params.data
-            ma_params.data = self.update_average(old_weight, up_weight)
-
-    def update_average(self, old, new):
-        if old is None:
-            return new
-        return old * self.beta + (1 - self.beta) * new
-
-
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, x, *args, **kwargs):
-        return self.fn(x, *args, **kwargs) + x
-
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
-
-
-def Upsample(dim):
-    return nn.ConvTranspose2d(dim, dim, 4, 2, 1)
-
-
-def Downsample(dim):
-    return nn.Conv2d(dim, dim, 4, 2, 1)
-
-
-class LayerNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
-        self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
-
-    def forward(self, x):
-        var = torch.var(x, dim=1, unbiased=False, keepdim=True)
-        mean = torch.mean(x, dim=1, keepdim=True)
-        return (x - mean) / (var + self.eps).sqrt() * self.g + self.b
-
-
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.fn = fn
-        self.norm = LayerNorm(dim)
-
-    def forward(self, x):
-        x = self.norm(x)
-        return self.fn(x)
-
-
-class ConvNextBlock(nn.Module):
-    """ https://arxiv.org/abs/2201.03545 """
-
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.GELU(),
-            nn.Linear(time_emb_dim, dim)
-        ) if exists(time_emb_dim) else None
-
-        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
-
-        self.net = nn.Sequential(
-            LayerNorm(dim) if norm else nn.Identity(),
-            nn.Conv2d(dim, dim_out * mult, 3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1)
-        )
-
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
-
-    def forward(self, x, time_emb=None):
-        h = self.ds_conv(x)
-
-        if exists(self.mlp):
-            assert exists(time_emb), 'time emb must be passed in'
-            condition = self.mlp(time_emb)
-            h = h + rearrange(condition, 'b c -> b c 1 1')
-
-        h = self.net(h)
-        return h + self.res_conv(x)
-
-
-class LinearAttention(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32):
-        super().__init__()
-        self.scale = dim_head ** -0.5
-        self.heads = heads
-        hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h=self.heads), qkv)
-        q = q * self.scale
-
-        k = k.softmax(dim=-1)
-        context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
-
-        out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
-        out = rearrange(out, 'b h c (x y) -> b (h c) x y', h=self.heads, x=h, y=w)
-        return self.to_out(out)
-
-
-class Unet(nn.Module):
-    def __init__(
-            self,
-            dim,
-            out_dim=None,
-            dim_mults=(1, 2, 4, 8),
-            channels=3,
-            with_time_emb=True,
-            residual=False
-    ):
-        super().__init__()
-        self.channels = channels
-        self.residual = residual
-        print("Is Time embed used ? ", with_time_emb)
-
-        dims = [channels, *map(lambda m: dim * m, dim_mults)]
-        in_out = list(zip(dims[:-1], dims[1:]))
-
-        if with_time_emb:
-            time_dim = dim
-            self.time_mlp = nn.Sequential(
-                SinusoidalPosEmb(dim),
-                nn.Linear(dim, dim * 4),
-                nn.GELU(),
-                nn.Linear(dim * 4, dim)
-            )
-        else:
-            time_dim = None
-            self.time_mlp = None
-
-        self.downs = nn.ModuleList([])
-        self.ups = nn.ModuleList([])
-        num_resolutions = len(in_out)
-
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (num_resolutions - 1)
-
-            self.downs.append(nn.ModuleList([
-                ConvNextBlock(dim_in, dim_out, time_emb_dim=time_dim, norm=ind != 0),
-                ConvNextBlock(dim_out, dim_out, time_emb_dim=time_dim),
-                Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                Downsample(dim_out) if not is_last else nn.Identity()
-            ]))
-
-        mid_dim = dims[-1]
-        self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
-        self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
-        self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
-
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
-            is_last = ind >= (num_resolutions - 1)
-
-            self.ups.append(nn.ModuleList([
-                ConvNextBlock(dim_out * 2, dim_in, time_emb_dim=time_dim),
-                ConvNextBlock(dim_in, dim_in, time_emb_dim=time_dim),
-                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                Upsample(dim_in) if not is_last else nn.Identity()
-            ]))
-
-        out_dim = default(out_dim, channels)
-        self.final_conv = nn.Sequential(
-            ConvNextBlock(dim, dim),
-            nn.Conv2d(dim, out_dim, 1)
-        )
-
-    def forward(self, x, time):
-        orig_x = x
-        t = self.time_mlp(time) if exists(self.time_mlp) else None
-
-        h = []
-
-        for convnext, convnext2, attn, downsample in self.downs:
-            x = convnext(x, t)
-            x = convnext2(x, t)
-            x = attn(x)
-            h.append(x)
-            x = downsample(x)
-
-        x = self.mid_block1(x, t)
-        x = self.mid_attn(x)
-        x = self.mid_block2(x, t)
-
-        for convnext, convnext2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim=1)
-            x = convnext(x, t)
-            x = convnext2(x, t)
-            x = attn(x)
-            x = upsample(x)
-        if self.residual:
-            return self.final_conv(x) + orig_x
-
-        return self.final_conv(x)
-
+from utils_metrics.utils import exists, default, cycle, cycle_cat, num_to_groups, loss_backwards, \
+                         extract, noise_like, cosine_beta_schedule, patchify, unpatchify, random_masking
+from utils_metrics.fid_score import calculate_fid_given_samples
+from models.Unet import Unet, EMA
+
+LOG = logging.getLogger(__name__)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 class GaussianDiffusion(nn.Module):
-    def __init__(
-            self,
-            defade_fn,
-            *,
-            image_size,
-            device_of_kernel,
-            channels=3,
-            timesteps=1000,
-            loss_type='l1',
-            start_fade_factor=0.1,
-            fade_routine='Incremental',
-            train_routine='Final',
-            sampling_routine='default'
-    ):
-        super().__init__()
-        self.channels = channels
-        self.image_size = image_size
-        self.defade_fn = defade_fn
-        self.device_of_kernel = device_of_kernel
+    def __init__(self,defade_fn,cfg):
 
-        self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
-        self.start_fade_factor = start_fade_factor
-        self.fade_routine = fade_routine
+        super().__init__()
+        self.cfg = cfg
+        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
+        self.channels = self.cfg.trainer.diffusion.channels
+        self.image_size = self.cfg.trainer.diffusion.image_size
+        self.denoise_fn = denoise_fn
+        self.num_timesteps = self.cfg.trainer.diffusion.timesteps
+        self.loss_type = self.cfg.trainer.diffusion.loss_type
+        self.device_of_kernel = self.cfg.trainer.device_of_kernel
+
+        self.start_fade_factor = self.cfg.trainer.diffusion.start_fade_factor
+        self.fade_routine = self.cfg.trainer.diffusion.fade_routine
 
         self.fade_factors = self.get_fade_factors()
-        self.train_routine = train_routine
-        self.sampling_routine = sampling_routine
+        self.train_routine = self.cfg.trainer.diffusion.train_routine
+        self.sampling_routine= self.cfg.trainer.diffusion.sampling_routine
 
-    def get_fade_factors(self):
+    def get_fade_factors(self, img_size = 32, mask_size = 4):
         fade_factors = []
         for i in range(self.num_timesteps):
             if self.fade_routine == 'Incremental':
@@ -352,17 +59,24 @@ class GaussianDiffusion(nn.Module):
             elif self.fade_routine == 'Constant':
                 fade_factors.append(1 - self.start_fade_factor)
             elif self.fade_routine == 'Spiral':
-                A = np.arange(32 * 32).reshape(32, 32)
+                A = np.arange(img_size * img_size).reshape(img_size, img_size)
                 spiral = to_spiral(A)
                 k = spiral > i
                 k = torch.tensor(k).float()
                 fade_factors.append(k.cuda())
             elif self.fade_routine == 'Spiral_2':
-                A = np.arange(32 * 32).reshape(32, 32)
+                A = np.arange(img_size * img_size).reshape(img_size, img_size)
                 spiral = to_spiral(A)
                 k = spiral > i
                 k = torch.tensor(k).float()
                 fade_factors.append(k.cuda())
+            elif self.fade_routine == 'Mask':
+                patched_inputs = patchify(img_tensor.unsqueeze(0))
+                patched_inputs_size = torch.ones((img_size**2/mask_size**2, self.channels*mask_size**2))
+                img_masked, mask, ids = random_masking(patched_inputs, i/self.num_timesteps)
+                new_mask = 1 - mask.unsqueeze(2).repeat(1, 1,patched_inputs.size(2))
+                fade_factors.append(unpatchify(new_mask).cuda())
+
 
 
         return fade_factors
@@ -371,24 +85,7 @@ class GaussianDiffusion(nn.Module):
     def sample(self, batch_size=16, img=None, t=None):
 
         if t is None:
-            t = self.num_timesteps
-        for i in range(t):
-            with torch.no_grad():
-                img = self.fade_factors[i] * img
-
-
-        if self.fade_routine == 'Spiral_2':
-            new_mean = torch.rand((img.shape[0], 3))
-            new_mean = new_mean.unsqueeze(2).repeat(1, 1, img.shape[2])
-            new_mean = new_mean.unsqueeze(3).repeat(1, 1, 1, img.shape[3]).cuda()
-
-        for i in range(t):
-            with torch.no_grad():
-                if self.fade_routine == 'Spiral_2':
-                    img = self.fade_factors[i] * img + new_mean * (torch.ones_like(self.fade_factors[i]) - self.fade_factors[i])
-                else:
-                    img = self.fade_factors[i] * img
-
+            t = self.num_timesteps        
         xt = img
         direct_recons = None
         while t:
@@ -631,17 +328,17 @@ class GaussianDiffusion(nn.Module):
             else:
                 raise NotImplementedError()
 
-        elif self.train_routine == 'Step':
-            x_fade = self.q_sample(x_start=x_start, t=t)
-            x_fade_sub = self.q_sample(x_start=x_start, t=t - 1)
-            x_blur_sub_pred = self.defade_fn(x_fade, t)
+        # elif self.train_routine == 'Step':
+        #     x_fade = self.q_sample(x_start=x_start, t=t)
+        #     x_fade_sub = self.q_sample(x_start=x_start, t=t - 1)
+        #     x_blur_sub_pred = self.defade_fn(x_fade, t)
 
-            if self.loss_type == 'l1':
-                loss = (x_fade_sub - x_blur_sub_pred).abs().mean()
-            elif self.loss_type == 'l2':
-                loss = F.mse_loss(x_fade_sub, x_blur_sub_pred)
-            else:
-                raise NotImplementedError()
+        #     if self.loss_type == 'l1':
+        #         loss = (x_fade_sub - x_blur_sub_pred).abs().mean()
+        #     elif self.loss_type == 'l2':
+        #         loss = F.mse_loss(x_fade_sub, x_blur_sub_pred)
+        #     else:
+        #         raise NotImplementedError()
 
         return loss
 
@@ -700,8 +397,7 @@ class Dataset_Cifar10(data.Dataset):
 
 
 class Trainer(object):
-    def __init__(
-            self,
+    def __init__(self, diffusion_model, cfg, writer):
             diffusion_model,
             folder,
             *,
@@ -720,42 +416,55 @@ class Trainer(object):
             dataset=None
     ):
         super().__init__()
+        self.cfg = cfg
+        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
+        self.folder = self.cfg.dataset.folder
+
+        self.ema_decay = self.cfg.trainer.ema_decay
+        self.image_size = self.cfg.trainer.image_size
+        self.batch_size = self.cfg.trainer.train_batch_size
+        self.train_lr = self.cfg.trainer.lr
+        self.train_num_steps = self.cfg.trainer.train_num_steps
+        self.gradient_accumulate_every = self.cfg.trainer.gradient_accumulate_every
+        self.fp16 = self.cfg.trainer.fp16
+        self.step_start_ema = self.cfg.trainer.step_start_ema
+        self.update_ema_every = self.cfg.trainer.update_ema_every
+        self.save_and_sample_every = self.cfg.trainer.save_and_sample_every
+        self.results_folder = self.cfg.trainer.results_folder
+        self.load_path = self.cfg.trainer.checkpointpath
+        self.dataset = self.cfg.dataset.name
+        self.mode = self.cfg.dataset.mode
+        self.writer = writer
+        self.gpu = self.cfg.trainer.gpu
+
         self.model = diffusion_model
-        self.ema = EMA(ema_decay)
+        self.ema = EMA(self.ema_decay)
         self.ema_model = copy.deepcopy(self.model)
-        self.update_ema_every = update_ema_every
 
-        self.step_start_ema = step_start_ema
-        self.save_and_sample_every = save_and_sample_every
-
-        self.batch_size = train_batch_size
-        self.image_size = diffusion_model.image_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-        self.train_num_steps = train_num_steps
 
         if dataset == 'cifar10':
-            self.ds = Dataset_Cifar10(folder, image_size)
+            self.ds = Dataset_Cifar10(self.folder, self.image_size)
         else:
-            self.ds = Dataset(folder, image_size)
-        self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True))
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+            self.ds = Dataset(self.folder, self.image_size)
+        self.sampler = DistributedSampler(self.ds, num_replicas=self.cfg.trainer.world_size, seed = self.cfg.trainer.seed,  rank=self.cfg.trainer.rank)
+        self.dl = cycle(data.DataLoader(self.ds, batch_size=self.train_batch_size, sampler=self.sampler, pin_memory=True))
+        self.opt = Adam(self.model.parameters(), lr=self.train_lr)
 
         self.step = 0
 
-        assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
+        assert not self.fp16 or self.fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
 
-        self.fp16 = fp16
-        if fp16:
+        if self.fp16:
             (self.model, self.ema_model), self.opt = amp.initialize([self.model, self.ema_model], self.opt,
                                                                     opt_level='O1')
 
-        self.results_folder = Path(results_folder)
+        self.results_folder = Path(self.results_folder)
         self.results_folder.mkdir(exist_ok=True)
 
         self.reset_parameters()
 
-        if load_path is not None:
-            self.load(load_path)
+        if self.load_path is not None:
+            self.load(self.load_path)
 
     def reset_parameters(self):
         self.ema_model.load_state_dict(self.model.state_dict())
@@ -800,6 +509,31 @@ class Trainer(object):
         cv2.putText(vcat, str(title), (violet.shape[1] // 2, height - 2), font, 0.5, (0, 0, 0), 1, 0)
         cv2.imwrite(path, vcat)
 
+
+    def save_image_and_log(self,og_img, all_images, direct_recons, xt, milestone, mode = 'Train'):
+        try:
+            og_img = (og_img + 1) * 0.5
+            utils.save_image(og_img, str(self.results_folder / f'{mode}/sample-og-{milestone}.png'), nrow=6)
+
+            all_images = (all_images + 1) * 0.5
+            utils.save_image(all_images, str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'), nrow = 6)
+
+            direct_recons = (direct_recons + 1) * 0.5
+            utils.save_image(direct_recons, str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'), nrow=6)
+
+            xt = (xt + 1) * 0.5
+            utils.save_image(xt, str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'),nrow=6)
+            time.sleep(1)
+            
+            LOG.info("Logging image")
+            wandb.log({f"{mode}_img/target_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og-{milestone}.png'))})
+            # wandb.log({f"{mode}_img/noise_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
+            wandb.log({f"{mode}_img/full_reconstruction{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'))})
+            wandb.log({f"{mode}_img/direct_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'))})
+            wandb.log({f"{mode}_img/xt_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'))})
+            # wandb.log({f"{mode}_img/noise_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
+        except:
+            LOG.error(f"Issue when logging images for {milestone}")
     def train(self):
         backwards = partial(loss_backwards, self.fp16)
 
@@ -809,7 +543,12 @@ class Trainer(object):
             for i in range(self.gradient_accumulate_every):
                 data = next(self.dl).cuda()
                 loss = self.model(data)
-                print(f'{self.step}: {loss.item()}')
+                if self.step % 100 == 0:
+                    if self.cfg.trainer.platform == 'slurm':
+                        print(f'{self.step}: {loss.item()}')
+                    LOG.info(f'{self.step}: {loss.item()}')
+                if self.writer is not None:
+                     self.writer.add_scalar("Train/Loss", loss.item(), self.step)
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
 
@@ -822,31 +561,21 @@ class Trainer(object):
                 self.step_ema()
 
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                milestone = self.step // self.save_and_sample_every
-                batches = self.batch_size
-                og_img = next(self.dl).cuda()
-                xt, direct_recons, all_images = self.ema_model.sample(batch_size=batches, faded_recon_sample=og_img)
+                if self.cfg.trainer.gpu == 0:
+                    milestone = self.step // self.save_and_sample_every
+                    batches = self.batch_size
+                    og_img = next(self.dl).cuda()
 
-                og_img = (og_img + 1) * 0.5
-                utils.save_image(og_img, str(self.results_folder / f'sample-og-{milestone}.png'), nrow=6)
+                    xt, direct_recons, all_images = self.ema_model.sample(batch_size=batches, faded_recon_sample=og_img)
+                    self.save_image_and_log(og_img, all_images, direct_recons, xt, milestone, mode = 'Train')
 
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow=6)
+                    acc_loss = acc_loss / (self.save_and_sample_every + 1)
+                    LOG.info(f'Mean of last {self.step}: {acc_loss}')
+                    
 
-                direct_recons = (direct_recons + 1) * 0.5
-                utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'),
-                                 nrow=6)
-
-                xt = (xt + 1) * 0.5
-                utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
-                                 nrow=6)
-
-                acc_loss = acc_loss / (self.save_and_sample_every + 1)
-                print(f'Mean of last {self.step}: {acc_loss}')
+                    self.save()
                 acc_loss = 0
-
-                self.save()
-
+                dist.barrier()
             self.step += 1
 
         print('training completed')

@@ -5,8 +5,8 @@ name: blur_diffusion
 platform: local
 
 log_level: INFO
-results_folder: ./results
-checkpointpath: 
+results_folder: /mnt/scitas/bastien/results
+checkpointpath: /mnt/scitas/bastien/results/Blur/model_400000.pt
 seed: 42
 #### Tracker
 use_clearml: false 

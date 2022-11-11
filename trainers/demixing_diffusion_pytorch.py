@@ -34,7 +34,8 @@ import matplotlib.image as mpimg
 from torch import linalg as LA
 from sklearn.mixture import GaussianMixture
 import wandb
-
+import logging
+CUDA_LAUNCH_BLOCKING=1
 try:
     from apex import amp
     APEX_AVAILABLE = True
@@ -63,6 +64,9 @@ class GaussianDiffusion(nn.Module):
         self.train_routine = self.cfg.trainer.diffusion.train_routine
         self.sampling_routine= self.cfg.trainer.diffusion.sampling_routine
         self.discrete= self.cfg.trainer.diffusion.discrete
+        self.recover_dominant = self.cfg.trainer.recover_dominant
+        self.use_epsilon_estimate = self.cfg.trainer.use_epsilon_estimate
+        self.use_v_prediction = self.cfg.trainer.use_v_prediction
         self.gpu = self.cfg.trainer.gpu
         betas = cosine_beta_schedule(self.num_timesteps)
         alphas = 1. - betas
@@ -75,36 +79,45 @@ class GaussianDiffusion(nn.Module):
 
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, img = None, t=None):
+    def sample(self, batch_size = 16, img = None, t=None, sqrt_alphas_cumprod = None, sqrt_one_minus_alphas_cumprod = None):
         
         self.denoise_fn.eval()
-
         if t == None:
             t = self.num_timesteps
-        # elif t < 2:
-        #     LOG.info(f"timesteps changed to 3 per default.")
-        #     t = 3
-
-
-
+        if sqrt_alphas_cumprod is None or sqrt_one_minus_alphas_cumprod is None:        
+            sqrt_alphas_cumprod = self.sqrt_alphas_cumprod
+            sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod
+        
         xt = img
         direct_recons = None
         while (t):
+            # print(f"t : {t}")
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda(self.gpu)
-            x1_bar = self.denoise_fn(img, step)
-            x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
+            
+            if self.use_v_prediction:
+                pass
+                v_pred = self.denoise_fn(img, step)
+                x1_bar = - extract(sqrt_alphas_cumprod, step, v_pred.shape) * v_pred + \
+                           extract(sqrt_one_minus_alphas_cumprod, step, img.shape) * img
+            else:
+                x1_bar = self.denoise_fn(img, step)
+
+            x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step, sqrt_alphas=sqrt_alphas_cumprod, 
+                                            sqrt_one_minus_alphas=sqrt_one_minus_alphas_cumprod)
 
             if direct_recons is None:
                 direct_recons = x1_bar
 
             xt_bar = x1_bar
             if t != 0:
-                xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
+                xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step,sqrt_alphas_cumprod=sqrt_alphas_cumprod,
+                                        sqrt_one_minus_alphas_cumprod=sqrt_one_minus_alphas_cumprod)
 
             xt_sub1_bar = x1_bar
             if t - 1 != 0:
                 step2 = torch.full((batch_size,), t - 2, dtype=torch.long).cuda(self.gpu)
-                xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
+                xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2, sqrt_alphas_cumprod=sqrt_alphas_cumprod,
+                                        sqrt_one_minus_alphas_cumprod=sqrt_one_minus_alphas_cumprod)
 
             x = img - xt_bar + xt_sub1_bar
             
@@ -114,11 +127,75 @@ class GaussianDiffusion(nn.Module):
 
         return xt, direct_recons, img, x2_bar
 
-    def get_x2_bar_from_xt(self, x1_bar, xt, t):
-        return (
-                (xt - extract(self.sqrt_alphas_cumprod, t, x1_bar.shape) * x1_bar) /
-                extract(self.sqrt_one_minus_alphas_cumprod, t, x1_bar.shape)
-        )
+    def get_x2_bar_from_xt(self, x1_bar, xt, t, sqrt_alphas = None, sqrt_one_minus_alphas = None):
+        if sqrt_alphas is None or sqrt_one_minus_alphas is None:
+            return (
+                    (xt - extract(self.sqrt_alphas_cumprod, t, x1_bar.shape) * x1_bar) /
+                    extract(self.sqrt_one_minus_alphas_cumprod, t, x1_bar.shape)
+            )
+        else:
+            return (
+                    (xt - extract(sqrt_alphas, t, x1_bar.shape) * x1_bar) /
+                    extract(sqrt_one_minus_alphas, t, x1_bar.shape)
+            )
+
+
+    # @torch.no_grad()
+    # def sample(self, batch_size = 16, img = None, t=None):
+        
+    #     self.denoise_fn.eval()
+
+    #     if t == None:
+    #         t = self.num_timesteps
+    #     # elif t < 2:
+    #     #     LOG.info(f"timesteps changed to 3 per default.")
+    #     #     t = 3
+    #     xt = img
+    #     direct_recons = None 
+    #     direct_noise_recons = None
+    #     with torch.no_grad():
+    #         t_start = torch.full((batch_size,), int(t)-1 , dtype=torch.long).cuda(self.gpu)
+    #         while (t):             
+    #             step = torch.full((batch_size,), t -1, dtype=torch.long).cuda(self.gpu)
+    #             x0_bar = self.denoise_fn(xt, step)
+    #             noise_bar = self.get_x2_bar_from_xt(x0_bar, img, step)
+
+    #             if direct_recons is None:
+    #                 direct_recons = x0_bar
+    #                 direct_noise_recons = noise_bar
+
+    #             # xt_bar = x1_bar
+    #             # if t != 0:
+                    
+
+    #             # xt_sub1_bar = x0_bar
+    #             if (t - 1) > 0:
+    #                 t = t - 1 
+    #                 xt_bar = self.q_sample(x_start=x0_bar, x_end=noise_bar, t=t_start)
+    #                 step2 = torch.full((batch_size,), t - 1, dtype=torch.long).cuda(self.gpu)
+    #                 xt_sub1_bar = self.q_sample(x_start=x0_bar, x_end=noise_bar, t=step2)
+    #                 xt = img - xt_bar + xt_sub1_bar
+    #                 if t % 100 == 0:
+    #                     print(f"Step {t} : {xt[0]}")
+    #             else:
+    #                 t = t - 1
+    #                 xt = x0_bar
+    #                 print(f"Step {t} : {xt[0]}")
+    #         full_reconstruction = xt
+    #             # x = img - xt_bar + xt_t_bar
+    #             # img = x
+    #             # t = t - 1
+             
+    #     self.denoise_fn.train()
+
+    #     return img , direct_recons, full_reconstruction, direct_noise_recons
+
+    # def get_x2_bar_from_xt(self, x1_bar, xt, t):
+    #     # print(f"t : {t}, alpha_t : {extract(self.sqrt_alphas_cumprod, t, x1_bar.shape)[0][0][0].item()}")
+    #     return (
+    #             (xt - extract(self.sqrt_alphas_cumprod, t, x1_bar.shape) * x1_bar) /
+    #             extract(self.sqrt_one_minus_alphas_cumprod, t, x1_bar.shape)
+    #     )
 
     @torch.no_grad()
     def gen_sample(self, batch_size=16, img=None, noise_level=0, t=None):
@@ -231,11 +308,24 @@ class GaussianDiffusion(nn.Module):
 
         return X1_0s, X_ts
 
-    def q_sample(self, x_start, x_end, t):
+    def q_sample(self, x_start, x_end, t, sqrt_alphas_cumprod = None, sqrt_one_minus_alphas_cumprod = None ):
+        # simply use the alphas to interpolate
+        if sqrt_alphas_cumprod is None or sqrt_one_minus_alphas_cumprod is None:
+            return (
+                    extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
+                    extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_end
+            )
+        else:
+            return (
+                    extract(sqrt_alphas_cumprod, t, x_start.shape) * x_start +
+                    extract(sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_end
+            )
+
+    def v_sample(self, x_start, x_end, t):
         # simply use the alphas to interpolate
         return (
-                extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-                extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_end
+                - extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
+                extract(self.sqrt_one_minus_alphas_cumprod, t, x_end.shape) * x_end
         )
 
     def p_losses(self, x_start, x_end, t):
@@ -243,18 +333,24 @@ class GaussianDiffusion(nn.Module):
         if self.train_routine == 'Final':
             x_mix = self.q_sample(x_start=x_start, x_end=x_end, t=t)
             LOG.debug(f"x_mix, {x_mix.dtype}")
-            # x_mix_save  = (x_mix + 1) * 0.5
-            # utils.save_image(x_mix_save, str(self.cfg.trainer.results_folder + '/' + f'x_mix_save-{1}.png'), nrow=6)
-            # try:
-            #     wandb.log({f"x_mix_{1}": wandb.Image(str(self.cfg.trainer.results_folder + '/' + f'x_mix_save-{1}.png'))})
-            # except:
-            #     pass
-            # raise NotImplementedError
-            x_recon = self.denoise_fn(x_mix.float(), t)
+            if self.use_v_prediction:
+                v_target = self.v_sample(x_start=x_start, x_end=x_end, t=t).float()
+                v_pred = self.denoise_fn(x_mix.float(), t)
+                loss = F.mse_loss(v_target, v_pred)
+                return loss
+            else:
+                x_recon = self.denoise_fn(x_mix.float(), t)
             if self.loss_type == 'l1':
                 loss = (x_start - x_recon).abs().mean()
+                if self.use_epsilon_estimate:
+                    espilon_estimate = self.get_x2_bar_from_xt(x_recon, x_mix, t)
+                    loss += (x_end - espilon_estimate).abs().mean()
             elif self.loss_type == 'l2':
                 loss = F.mse_loss(x_start, x_recon)
+                if self.use_epsilon_estimate:
+                    espilon_estimate = self.get_x2_bar_from_xt(x_recon, x_mix, t)
+                    loss += F.mse_loss(x_end, espilon_estimate)
+            
             else:
                 raise NotImplementedError
 
@@ -263,7 +359,10 @@ class GaussianDiffusion(nn.Module):
     def forward(self, x1, x2, *args, **kwargs):
         b, c, h, w, device, img_size, = *x1.shape, x1.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
+        if self.recover_dominant:
+            t = torch.randint(0, int((self.num_timesteps-1)/2), (b,), device=device).long()
+        else:
+            t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         return self.p_losses(x1, x2, t, *args, **kwargs)
 
 class Dataset_Aug1(data.Dataset):
@@ -367,8 +466,9 @@ class Trainer(object):
         self.mode = self.cfg.dataset.mode
         self.writer = writer
         self.gpu = self.cfg.trainer.gpu
-    
+        
         self.model = diffusion_model
+        self.num_timesteps = self.cfg.trainer.diffusion.timesteps
         self.ema = EMA(self.ema_decay)
         self.ema_model = copy.deepcopy(self.model)
 
@@ -404,7 +504,7 @@ class Trainer(object):
         self.results_folder = Path(self.results_folder)
         self.results_folder.mkdir(exist_ok = True)
 
-        for mode in ['Test', 'Train']:
+        for mode in ['Test', 'Train','Generate']:
             folder = Path(str(self.results_folder / f'{mode}'))
             folder.mkdir(exist_ok = True)
 
@@ -414,7 +514,7 @@ class Trainer(object):
 
         if self.load_path != None:
             self.load(self.load_path)
-        print("initialisation done...")
+        LOG.info(f"Initialisation done on {self.gpu}")
 
 
     def reset_parameters(self):
@@ -489,19 +589,48 @@ class Trainer(object):
             time.sleep(1)
             
             LOG.info("Logging image")
-            wandb.log({f"{mode}_img/target_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'))})
-            wandb.log({f"{mode}_img/noise_sample_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
-            wandb.log({f"{mode}_img/full_reconstruction{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'))})
-            wandb.log({f"{mode}_img/direct_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'))})
-            wandb.log({f"{mode}_img/xt_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'))})
-            wandb.log({f"{mode}_img/noise_reconstruction_{milestone}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
-        except:
-            LOG.error(f"Issue when logging images for {milestone}")        
+            wandb.log({f"{mode}_img/target_sample_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/sample-og1-{milestone}.png'))})
+            wandb.log({f"{mode}_img/noise_sample_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
+            wandb.log({f"{mode}_img/full_reconstruction{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/sample-recon-{milestone}.png'))})
+            wandb.log({f"{mode}_img/direct_reconstruction_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/sample-direct_recons-{milestone}.png'))})
+            wandb.log({f"{mode}_img/xt_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/sample-xt-{milestone}.png'))})
+            wandb.log({f"{mode}_img/noise_reconstruction_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
+        except Exception as e:
+            LOG.error(f"Issue {e} when logging images for {milestone}")        
+
+    def generate(self):      
+        milestone = self.step // self.save_and_sample_every
+        batches = self.batch_size
+
+        ## GET schedule given max noise proportion
+        noise_max_weight = self.cfg.trainer.noise.max_weight 
+        betas = cosine_beta_schedule(self.num_timesteps)
+        alphas = 1. - betas
+        alphas_cumprod = torch.cumprod(torch.from_numpy(alphas), axis=0) * noise_max_weight
+        sqrt_alphas_cumprod= torch.sqrt(alphas_cumprod).cuda()
+        sqrt_one_minus_alphas_cumprod = torch.sqrt(noise_max_weight - alphas_cumprod).cuda()
+
+        if self.cfg.trainer.gpu == 0:
+            og_img1 = next(self.dl1).cuda(self.gpu)
+            og_img2 = next(self.dl2).cuda(self.gpu)
+            if self.cfg.trainer.use_random_noise:
+                og_img2 =  og_img2 + np.random.rand() * torch.randn_like(og_img2).cuda(self.cfg.trainer.gpu)
+            with torch.no_grad():
+                t = self.num_timesteps
+                step = torch.full((self.batch_size,), t-1, dtype=torch.long, device=og_img1.device)
+                img = self.model.module.q_sample(x_start=og_img1, x_end=og_img2, t=step, sqrt_alphas_cumprod=sqrt_alphas_cumprod,
+                    sqrt_one_minus_alphas_cumprod=sqrt_one_minus_alphas_cumprod)
+            xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=img, t = t, sqrt_alphas_cumprod=sqrt_alphas_cumprod,
+                    sqrt_one_minus_alphas_cumprod=sqrt_one_minus_alphas_cumprod)
+            self.save_image_and_log(og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Generate')
+            
+            # experiment.log_metric("Training Loss", acc_loss, step=self.step)
+            LOG.info('Generation completed')
 
     def train(self):
         # experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
         #                         project_name="Cold_Diffusion_Cycle")
-        print('started training')
+        # print('started training')
         backwards = partial(loss_backwards, self.fp16)
         acc_loss = 0
         while self.step < self.train_num_steps:
@@ -509,6 +638,9 @@ class Trainer(object):
             for i in range(self.gradient_accumulate_every):
                 data_1 = next(self.dl1).cuda(self.cfg.trainer.gpu)
                 data_2 = next(self.dl2).cuda(self.cfg.trainer.gpu)
+                if self.cfg.trainer.use_random_noise:
+                    data_2 =  data_2 + np.random.rand() * torch.randn_like(data_2).cuda(self.cfg.trainer.gpu)
+                
                 loss = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
                     if self.cfg.trainer.platform == 'slurm':
@@ -535,18 +667,21 @@ class Trainer(object):
                 if self.cfg.trainer.gpu == 0:
                     og_img1 = next(self.dl1).cuda(self.gpu)
                     og_img2 = next(self.dl2).cuda(self.gpu)
+                    if self.cfg.trainer.use_random_noise:
+                        og_img2 =  og_img2 + np.random.rand() * torch.randn_like(og_img2).cuda(self.cfg.trainer.gpu)
                     with torch.no_grad():
-                        step = torch.full((self.batch_size,), int((self.cfg.trainer.diffusion.timesteps-2)/2), dtype=torch.long, device=og_img1.device)
+                        t = np.random.randint(0, self.cfg.trainer.diffusion.timesteps)
+                        step = torch.full((self.batch_size,), t, dtype=torch.long, device=og_img1.device)
                         img = self.model.module.q_sample(x_start=og_img1, x_end=og_img2, t=step)
-                    xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=img)
+                    xt, direct_recons, all_images, noise_image = self.ema_model.module.sample(batch_size=batches, img=img, t = t)
                     self.save_image_and_log(og_img1, og_img2, all_images, direct_recons, xt, noise_image, milestone, mode = 'Train')
                     if self.mode == "train":
                         test_img1 = next(self.dl1).cuda(self.gpu)
                         test_img2 = next(self.dl2).cuda(self.gpu)
                         with torch.no_grad():
-                            step = torch.full((self.batch_size,), int((self.cfg.trainer.diffusion.timesteps-2)/2), dtype=torch.long, device=test_img1.device)
+                            step = torch.full((self.batch_size,), t, dtype=torch.long, device=test_img1.device)
                             test_img = self.model.module.q_sample(x_start=test_img1, x_end=test_img2, t=step)
-                        test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=test_img)
+                        test_xt, test_direct_recons, test_all_images, test_noise_image = self.ema_model.module.sample(batch_size=batches, img=test_img, t=t)
                         self.save_image_and_log(test_img1, test_img2, test_all_images, test_direct_recons, test_xt, test_noise_image, milestone, mode = 'Test')
                 # Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img1=og_img1, img2=og_img2)
                 

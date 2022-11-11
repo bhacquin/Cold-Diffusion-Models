@@ -1,22 +1,26 @@
-from comet_ml import Experiment
 import math
+import time 
+import wandb
 import copy
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
 from inspect import isfunction
 from functools import partial
-
 from torch.utils import data
 from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms, utils
 import torchvision
 from PIL import Image
+import torch.distributed as dist
 
 import numpy as np
 from tqdm import tqdm
 from einops import rearrange
+
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DistributedSampler
 
 import torchgeometry as tgm
 import glob
@@ -26,7 +30,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from torch import linalg as LA
 from sklearn.mixture import GaussianMixture
-
+import logging
 try:
     from apex import amp
     APEX_AVAILABLE = True
@@ -43,36 +47,31 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class GaussianDiffusion(nn.Module):
-    def __init__(
-        self,
-        denoise_fn,
-        *,
-        image_size,
-        channels = 3,
-        timesteps = 1000,
-        loss_type = 'l1',
-        train_routine = 'Final',
-        sampling_routine='default',
-        discrete=False
-    ):
+    def __init__(self, denoise_fn, cfg):
+
         super().__init__()
-        self.channels = channels
-        self.image_size = image_size
+        self.cfg = cfg
+        LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
+        self.channels = self.cfg.trainer.diffusion.channels
+        self.image_size = self.cfg.trainer.diffusion.image_size
         self.denoise_fn = denoise_fn
+        self.num_timesteps = self.cfg.trainer.diffusion.timesteps
+        self.loss_type = self.cfg.trainer.diffusion.loss_type
+        self.train_routine = self.cfg.trainer.diffusion.train_routine
+        self.sampling_routine = self.cfg.trainer.diffusion.sampling_routine
+        self.discrete= self.cfg.trainer.diffusion.discrete
+        try:
+            self.gpu = self.cfg.trainer.gpu 
+        except:
+            self.gpu = 0
 
-        self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
-
-        betas = cosine_beta_schedule(timesteps)
+        betas = cosine_beta_schedule(self.num_timesteps)
         alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
+        alphas_cumprod = torch.cumprod(torch.from_numpy(alphas), axis=0)
 
         self.register_buffer('alphas_cumprod', alphas_cumprod)
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
-
-        self.train_routine = train_routine
-        self.sampling_routine = sampling_routine
 
     @torch.no_grad()
     def sample(self, batch_size = 16, img=None, t=None):
@@ -116,57 +115,107 @@ class GaussianDiffusion(nn.Module):
         )
 
     @torch.no_grad()
-    def gen_sample(self, batch_size=16, img=None, t=None):
+    def gen_sample(self, batch_size=16, img=None, t=None, number_of_loop = 1):
+        # LOG.info(f"Sampling routine : {self.sampling_routine}")
         self.denoise_fn.eval()
+        
         if t == None:
             t = self.num_timesteps
+            t_original = self.num_timesteps
+        else:
+            t_original = t
 
         noise = img
         direct_recons = None
+        first_noisification = True
 
-        if self.sampling_routine == 'ddim':
-            while (t):
-                step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
-                x1_bar = self.denoise_fn(img, step)
-                x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
-                if direct_recons == None:
-                    direct_recons = x1_bar
+        for k in range(number_of_loop):
+            LOG.info(f"Loop number : {k}")
+            t = t_original
+            if self.sampling_routine == 'ddim':
+                if self.cfg.generator.model.add_gaussian:
+                    step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                    noise_gaussian = torch.randn_like(img)
+                    img = self.q_sample(x_start=img, x_end=noise_gaussian, t=step)
+                while (t):
+                    step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                    x1_bar = self.denoise_fn(img, step)
+                    x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
+                    if direct_recons == None:
+                        direct_recons = x1_bar
 
-                xt_bar = x1_bar
-                if t != 0:
-                    xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
+                    xt_bar = x1_bar
+                    if t != 0:
+                        xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
 
-                xt_sub1_bar = x1_bar
-                if t - 1 != 0:
-                    step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
-                    xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
+                    xt_sub1_bar = x1_bar
+                    if t - 1 != 0:
+                        step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
+                        xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
 
-                x = img - xt_bar + xt_sub1_bar
-                img = x
-                t = t - 1
+                    x = img - xt_bar + xt_sub1_bar
+                    img = x
+                    t = t - 1
+                    if first_noisification:
+                        x_t_minus_1 = img
+                        first_noisification = False
 
-        elif self.sampling_routine == 'x0_step_down':
-            while (t):
-                step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
-                x1_bar = self.denoise_fn(img, step)
-                x2_bar = noise
-                if direct_recons == None:
-                    direct_recons = x1_bar
+            elif self.sampling_routine == 'x0_step_down':
+                if self.cfg.generator.model.add_gaussian:
+                    step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                    noise_gaussian = torch.randn_like(img)
+                    img = self.q_sample(x_start=img, x_end=noise_gaussian, t=step)
+                while (t):
+                    step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                    x1_bar = self.denoise_fn(img, step)
+                    x2_bar = torch.randn_like(img)
+                    if direct_recons == None:
+                        direct_recons = x1_bar
 
-                xt_bar = x1_bar
-                if t != 0:
-                    xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
+                    xt_bar = x1_bar
+                    if t != 0:
+                        xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
 
-                xt_sub1_bar = x1_bar
-                if t - 1 != 0:
-                    step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
-                    xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
+                    xt_sub1_bar = x1_bar
+                    if t - 1 != 0:
+                        step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
+                        xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
 
-                x = img - xt_bar + xt_sub1_bar
-                img = x
-                t = t - 1
+                    x = img - xt_bar + xt_sub1_bar
+                    img = x
+                    t = t - 1
+                    if first_noisification:
+                        x_t_minus_1 = img
+                        first_noisification = False
+            
+            elif self.sampling_routine == 'classic': 
+                while (t):
+                    step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                    x1_bar = self.denoise_fn(img, step)
+                    x2_bar = torch.randn_like(img)
 
-        return noise, direct_recons, img
+                    if direct_recons == None:
+                        direct_recons = x1_bar
+
+                    xt_bar = x1_bar
+                    if t != 0:
+                        # xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
+                        xt_bar = xt_bar * (1 - ((t-1) / self.num_timesteps)) + ((t-1) / self.num_timesteps) * x2_bar
+
+                    xt_sub1_bar = x1_bar
+                    if t - 1 != 0:
+                        step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
+                        xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
+
+                    # x = img - xt_bar + xt_sub1_bar
+                    # img = x
+                    img = xt_sub1_bar
+                    t = t - 1
+                    if first_noisification:
+                        x_t_minus_1 = img
+                        first_noisification = False
+
+        return noise, direct_recons, img, x_t_minus_1
 
 
     @torch.no_grad()
@@ -353,61 +402,54 @@ def adjust_data_parallel(old_state_dict):
     return new_state_dict
 
 class Trainer(object):
-    def __init__(
-        self,
-        diffusion_model,
-        folder,
-        *,
-        ema_decay = 0.995,
-        image_size = 128,
-        train_batch_size = 32,
-        train_lr = 2e-5,
-        train_num_steps = 100000,
-        gradient_accumulate_every = 2,
-        fp16 = False,
-        step_start_ema = 2000,
-        update_ema_every = 10,
-        save_and_sample_every = 1000,
-        results_folder = './results',
-        load_path = None,
-        dataset = None,
-        shuffle=True
-    ):
+    def __init__(self, diffusion_model, cfg, writer):
+    
         super().__init__()
+        self.cfg = cfg
+        # LOG.setLevel(os.environ.get("LOGLEVEL", self.cfg.trainer.log_level))
+        self.folder = self.cfg.dataset.folder
+        # self.folder_test = self.cfg.dataset.folder_test
+        self.ema_decay = self.cfg.trainer.ema_decay
+        self.image_size = self.cfg.trainer.image_size
+        self.batch_size = self.cfg.trainer.train_batch_size
+        self.train_lr = self.cfg.trainer.lr
+        self.train_num_steps = self.cfg.trainer.train_num_steps
+        self.gradient_accumulate_every = self.cfg.trainer.gradient_accumulate_every
+        self.fp16 = self.cfg.trainer.fp16
+        self.step_start_ema = self.cfg.trainer.step_start_ema
+        self.update_ema_every = self.cfg.trainer.update_ema_every
+        self.save_and_sample_every = self.cfg.trainer.save_and_sample_every
+        self.results_folder = self.cfg.trainer.results_folder
+        self.load_path = self.cfg.trainer.checkpointpath
+        self.dataset = self.cfg.dataset.name
+        self.mode = self.cfg.dataset.mode
+        self.writer = writer
+        self.gpu = self.cfg.trainer.gpu
+        
         self.model = diffusion_model
-        self.ema = EMA(ema_decay)
+        self.ema = EMA(self.ema_decay)
         self.ema_model = copy.deepcopy(self.model)
-        self.update_ema_every = update_ema_every
-
-        self.step_start_ema = step_start_ema
-        self.save_and_sample_every = save_and_sample_every
-
-        self.batch_size = train_batch_size
-        self.image_size = image_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-        self.train_num_steps = train_num_steps
-
-        if dataset == 'train':
-            print(dataset, "DA used")
-            self.ds = Dataset_Aug1(folder, image_size)
-            import os
+ 
+        if self.mode == 'train':
+            print(self.dataset, "DA used")
+            self.ds = Dataset_Aug1(self.folder, self.image_size)
         else:
-            print(dataset)
-            self.ds = Dataset(folder, image_size)
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
+            print(self.dataset)
+            self.ds = Dataset(self.folder, self.image_size)
+            
+        self.sampler = DistributedSampler(self.ds, num_replicas=self.cfg.trainer.world_size, seed = self.cfg.trainer.seed,  rank=self.cfg.trainer.rank)
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = self.batch_size, sampler=self.sampler, pin_memory=True, num_workers=16, drop_last=True))
 
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+        self.opt = Adam(diffusion_model.parameters(), lr=self.train_lr)
         self.step = 0
 
-        self.results_folder = Path(results_folder)
+        self.results_folder = Path(self.results_folder)
         self.results_folder.mkdir(exist_ok = True)
-
-        self.fp16 = fp16
 
         self.reset_parameters()
 
-        if load_path != None:
-            self.load(load_path)
+        if self.load_path != None:
+            self.load(self.load_path)
 
 
     def reset_parameters(self):
@@ -460,7 +502,31 @@ class Trainer(object):
         cv2.putText(vcat, str(title), (violet.shape[1] // 2, height-2), font, 0.5, (0, 0, 0), 1, 0)
         cv2.imwrite(path, vcat)
 
+    def save_image_and_log(self,og_img1, all_images, direct_recons, xt, milestone, mode = 'Train'):
+        try:
+            og_img1 = (og_img1 + 1) * 0.5
+            utils.save_image(og_img1, str(self.results_folder) + f'/sample-og1-{milestone}.png', nrow=6)
 
+            all_images = (all_images + 1) * 0.5
+            utils.save_image(all_images, str(self.results_folder) + f'/sample-recon-{milestone}.png', nrow = 6)
+
+            direct_recons = (direct_recons + 1) * 0.5
+            utils.save_image(direct_recons, str(self.results_folder) + f'/sample-direct_recons-{milestone}.png', nrow=6)
+
+            xt = (xt + 1) * 0.5
+            utils.save_image(xt, str(self.results_folder) + f'/sample-xt-{milestone}.png',nrow=6)
+
+            time.sleep(1)
+            
+            LOG.info("Logging image")
+            wandb.log({f"{mode}_img/target_sample_{milestone}_": wandb.Image(str(self.results_folder) + f'/sample-og1-{milestone}.png')})
+            # wandb.log({f"{mode}_img/noise_sample_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/sample-og2-{milestone}.png'))})
+            wandb.log({f"{mode}_img/full_reconstruction{milestone}": wandb.Image(str(self.results_folder) + f'/sample-recon-{milestone}.png')})
+            wandb.log({f"{mode}_img/direct_reconstruction_{milestone}": wandb.Image(str(self.results_folder) + f'/sample-direct_recons-{milestone}.png')})
+            wandb.log({f"{mode}_img/xt_{milestone}": wandb.Image(str(self.results_folder) + f'/sample-xt-{milestone}.png')})
+            # wandb.log({f"{mode}_img/noise_reconstruction_{milestone}_{time}": wandb.Image(str(self.results_folder / f'{mode}/noise_image_recons-{milestone}.png'))})
+        except Exception as e:
+            LOG.error(f"Issue {e} when logging images for {milestone}")        
 
     def train(self):
 
@@ -479,6 +545,8 @@ class Trainer(object):
                     print(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
+                if self.writer is not None:
+                    self.writer.add_scalar("Train/Loss", loss.item(), self.step)
 
             acc_loss = acc_loss + (u_loss/self.gradient_accumulate_every)
 
@@ -489,39 +557,117 @@ class Trainer(object):
                 self.step_ema()
 
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                milestone = self.step // self.save_and_sample_every
-                batches = self.batch_size
+                dist.barrier()
+                if self.cfg.trainer.gpu == 0:
+                    milestone = self.step // self.save_and_sample_every
+                    batches = self.batch_size
 
-                data_1 = next(self.dl)
-                data_2 = torch.randn_like(data_1)
-                og_img = data_2.cuda()
+                    data_1 = next(self.dl)
+                    data_2 = torch.randn_like(data_1)
+                    og_img = data_2.cuda()
 
-                xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
+                    xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
+                    print(f'direct_recon {direct_recons[0]}')
+                    self.save_image_and_log(data_1, all_images, direct_recons, xt, milestone, mode = 'Train')
+                    acc_loss = acc_loss/(self.save_and_sample_every+1)
+                    print(f'Mean of last {self.step}: {acc_loss}')
+                    acc_loss=0
 
-                og_img = (og_img + 1) * 0.5
-                utils.save_image(og_img, str(self.results_folder / f'sample-og-{milestone}.png'), nrow=6)
-
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
-
-                direct_recons = (direct_recons + 1) * 0.5
-                utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
-
-                xt = (xt + 1) * 0.5
-                utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
-                                 nrow=6)
-
-                acc_loss = acc_loss/(self.save_and_sample_every+1)
-                print(f'Mean of last {self.step}: {acc_loss}')
-                acc_loss=0
-
-                self.save()
-                if self.step % (self.save_and_sample_every * 100) == 0:
-                    self.save(self.step)
-
+                    self.save()
+                    if self.step % (self.save_and_sample_every * 100) == 0:
+                        self.save(self.step)
+                dist.barrier()
             self.step += 1
 
         print('training completed')
+
+    def generate(self):      
+        if self.cfg.trainer.gpu == 0:
+            milestone = 0
+            batches = self.batch_size
+
+            data_1 = next(self.dl)
+            data_1 = data_1.cuda()
+            ### depending on noise:
+            if self.cfg.trainer.noise.type == 'gaussian':
+                data_2 = torch.randn_like(data_1)
+            elif self.cfg.trainer.noise.type == 'blur':
+                self.blur_routine = self.cfg.trainer.noise.blur_routine
+                self.kernel_std = cfg.trainer.noise.kernel_std
+                self.kernel_size = cfg.trainer.noise.kernel_size
+
+                def blur(self, dims, std):
+                    return tgm.image.get_gaussian_kernel2d(dims, std)
+
+                @torch.no_grad()
+                def get_conv(self, dims, std, mode='circular', requires_grad = False):
+                    kernel = self.blur(dims, std)
+                    conv = nn.Conv2d(in_channels=self.channels, out_channels=self.channels, kernel_size=dims, padding=int((dims[0]-1)/2), padding_mode=mode,
+                                    bias=False, groups=self.channels)
+                    with torch.no_grad():
+                        kernel = torch.unsqueeze(kernel, 0)
+                        kernel = torch.unsqueeze(kernel, 0)
+                        kernel = kernel.repeat(self.channels, 1, 1, 1)
+                        conv.weight = nn.Parameter(kernel)
+                    if hasattr(conv, 'weight') and conv.bias is not None:
+                        conv.weight.requires_grad_(requires_grad)
+                    if hasattr(conv, 'bias') and conv.bias is not None:
+                        conv.bias.requires_grad_(requires_grad)
+                    return conv
+
+                @torch.no_grad()
+                def get_kernels(self):
+                    kernels = []
+                    for i in range(self.num_timesteps):
+                        if self.blur_routine == 'Incremental':
+                            kernels.append(self.get_conv((self.kernel_size, self.kernel_size), (self.kernel_std*(i+1), self.kernel_std*(i+1)) ) )
+                        elif self.blur_routine == 'Constant':
+                            kernels.append(self.get_conv((self.kernel_size, self.kernel_size), (self.kernel_std, self.kernel_std) ) )
+                        elif self.blur_routine == 'Constant_reflect':
+                            kernels.append(self.get_conv((self.kernel_size, self.kernel_size), (self.kernel_std, self.kernel_std), mode='reflect') )
+                        elif self.blur_routine == 'Exponential_reflect':
+                            ks = self.kernel_size
+                            kstd = np.exp(self.kernel_std * i)
+                            kernels.append(self.get_conv((ks, ks), (kstd, kstd), mode='reflect'))
+                        elif self.blur_routine == 'Exponential':
+                            ks = self.kernel_size
+                            kstd = np.exp(self.kernel_std * i)
+                            kernels.append(self.get_conv((ks, ks), (kstd, kstd)))
+                        elif self.blur_routine == 'Individual_Incremental':
+                            ks = 2*i+1
+                            kstd = 2*ks
+                            kernels.append(self.get_conv((ks, ks), (kstd, kstd)))
+                        elif self.blur_routine == 'Special_6_routine':
+                            ks = 11
+                            kstd = i/100 + 0.35
+                            kernels.append(self.get_conv((ks, ks), (kstd, kstd), mode='reflect'))
+                    return kernels
+                self.gaussian_kernels = nn.ModuleList(self.get_kernels())
+                for p in self.gaussian_kernels.parameters():
+                    p.requires_grad_(False)
+
+                ### BLURIFICATION OF DATA 1 
+                img = data_1
+                if self.blur_routine == 'Individual_Incremental':
+                    img = self.gaussian_kernels[t - 1](img)
+                else:
+                    for i in range(t):
+                        with torch.no_grad():
+                            img = self.gaussian_kernels[i](img)
+                data_2 = img.cuda()
+
+            elif self.cfg.trainer.noise.type == 'snow':
+                pass
+            elif self.cfg.trainer.noise.type == 'masked':
+                pass
+            elif self.cfg.trainer.noise.type == 'decolor':
+                pass
+
+            og_img = data_2.cuda()
+
+            xt, direct_recons, all_images = self.ema_model.module.gen_sample(batch_size=batches, img=og_img)
+            self.save_image_and_log(data_1, all_images, direct_recons, xt, milestone, mode = 'Test')
+        print('Generation completed')
 
     def test_from_data(self, extra_path, s_times=None):
         batches = self.batch_size

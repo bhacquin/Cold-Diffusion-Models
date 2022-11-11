@@ -31,7 +31,7 @@ class MainTrainer(BaseTrainer):
             from trainers.defading_diffusion_pytorch import  GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'demix':
             from trainers.demixing_diffusion_pytorch import GaussianDiffusion, Trainer
-        elif cfg.trainer.diffusion.type == 'denoise':
+        elif cfg.trainer.diffusion.type == 'gaussian':
             from trainers.denoising_diffusion_pytorch import GaussianDiffusion, Trainer
         elif cfg.trainer.diffusion.type == 'resolution':
             from trainers.resolution_diffusion_pytorch import GaussianDiffusion, Trainer
@@ -56,7 +56,7 @@ class MainTrainer(BaseTrainer):
             from trainers.defading_diffusion_pytorch import  GaussianDiffusion, Trainer
         elif self.cfg.trainer.diffusion.type == 'demix':
             from trainers.demixing_diffusion_pytorch import GaussianDiffusion, Trainer
-        elif self.cfg.trainer.diffusion.type == 'denoise':
+        elif self.cfg.trainer.diffusion.type == 'gaussian':
             from trainers.denoising_diffusion_pytorch import GaussianDiffusion, Trainer
         elif self.cfg.trainer.diffusion.type == 'resolution':
             from trainers.resolution_diffusion_pytorch import GaussianDiffusion, Trainer
@@ -83,7 +83,10 @@ class MainTrainer(BaseTrainer):
         ######## Looking for checkpoints
         LOG.info('Looking for existing checkpoints in output dir...')
         chk_path = self.cfg.trainer.checkpointpath
-        checkpoint_dict = self.checkpoint_load(chk_path)
+        try:
+            checkpoint_dict = self.checkpoint_load(chk_path)
+        except:
+            checkpoint_dict = False
         if checkpoint_dict:
         # Load Model parameters
             LOG.info(f'Checkpoint found: {str(chk_path)}')
@@ -112,9 +115,16 @@ class MainTrainer(BaseTrainer):
                     pass
         self.trainer = Trainer(self.diffusion,self.cfg, self.writer)
         dist.barrier()
+        
     def train(self) -> None:
         LOG.info(f"Starting on node {self.cfg.trainer.rank}, gpu {self.cfg.trainer.gpu}")
-        self.trainer.train()
+        if self.cfg.trainer.gen_only:
+            LOG.info(f"Starting generation on node {self.cfg.trainer.rank}, gpu {self.cfg.trainer.gpu}")
+            self.trainer.generate()
+            return 0
+        else:
+            LOG.info(f"Starting training on node {self.cfg.trainer.rank}, gpu {self.cfg.trainer.gpu}")
+            self.trainer.train()
         dist.barrier()
         if self.cfg.trainer.rank == 0:
             self.checkpoint_dump(checkpoint_path = self.cfg.trainer.checkpointpath, epoch=epoch)

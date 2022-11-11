@@ -252,73 +252,86 @@ class GaussianDiffusion(nn.Module):
         return xt, direct_recons, img
 
     @torch.no_grad()
-    def gen_sample(self, batch_size=16, img=None, t=None, noise_level=0):
+    def gen_sample(self, batch_size=16, img=None, t=None, blur_first = False, noise_level=0, number_of_loop = 1):
 
         self.denoise_fn.eval()
+        first_noisification = True
 
         if t == None:
             t = self.num_timesteps
-
-        if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t - 1](img)
-
+            t_original = self.num_timesteps
         else:
-            for i in range(t):
-                with torch.no_grad():
-                    img = self.gaussian_kernels[i](img)
+            t_original = t
+
+        if blur_first:
+            if self.blur_routine == 'Individual_Incremental':
+                img = self.gaussian_kernels[t - 1](img)
+
+            else:
+                for i in range(t):
+                    with torch.no_grad():
+                        img = self.gaussian_kernels[i](img)
 
         orig_mean = torch.mean(img, [2, 3], keepdim=True)
-        print(orig_mean.squeeze()[0])
+        # print(orig_mean.squeeze()[0])
 
         temp = img
         if self.discrete:
             img = torch.mean(img, [2, 3], keepdim=True)
             img = img.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
 
-        noise = torch.randn_like(img) * noise_level
-        img = img + noise
+        # noise = torch.randn_like(img) * noise_level
+        # img = img + noise
 
         # 3(2), 2(1), 1(0)
         xt = img
         direct_recons = None
-        while (t):
-            step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda(self.cfg.trainer.gpu)
-            x = self.denoise_fn(img, step)
+        LOG.info(f'Sampling routine {self.sampling_routine}')
+        for k in range(number_of_loop):
+            LOG.info(f"Loop number : {k}")
+            t = t_original
+            while (t):
+                step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda(self.cfg.trainer.gpu)
+                x = self.denoise_fn(img, step)
 
-            if self.train_routine == 'Final':
-                if direct_recons == None:
-                    direct_recons = x
+                if self.train_routine == 'Final':
+                    if direct_recons == None:
+                        direct_recons = x
 
-                if self.sampling_routine == 'default':
-                    if self.blur_routine == 'Individual_Incremental':
-                        x = self.gaussian_kernels[t - 2](x)
-                    else:
+                    if self.sampling_routine == 'default':
+                        
+                        if self.blur_routine == 'Individual_Incremental':
+                            x = self.gaussian_kernels[t - 2](x)
+                        else:
+                            for i in range(t - 1):
+                                with torch.no_grad():
+                                    x = self.gaussian_kernels[i](x)
+
+                    elif self.sampling_routine == 'x0_step_down':
+                        x_times = x
+                        for i in range(t):
+                            with torch.no_grad():
+                                x_times = self.gaussian_kernels[i](x_times)
+                                if self.discrete:
+                                    if i == (self.num_timesteps - 1):
+                                        x_times = torch.mean(x_times, [2, 3], keepdim=True)
+                                        x_times = x_times.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
+
+                        x_times_sub_1 = x
                         for i in range(t - 1):
                             with torch.no_grad():
-                                x = self.gaussian_kernels[i](x)
+                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
-                elif self.sampling_routine == 'x0_step_down':
-                    x_times = x
-                    for i in range(t):
-                        with torch.no_grad():
-                            x_times = self.gaussian_kernels[i](x_times)
-                            if self.discrete:
-                                if i == (self.num_timesteps - 1):
-                                    x_times = torch.mean(x_times, [2, 3], keepdim=True)
-                                    x_times = x_times.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
-
-                    x_times_sub_1 = x
-                    for i in range(t - 1):
-                        with torch.no_grad():
-                            x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
-
-                    x = img - x_times + x_times_sub_1
-            img = x
-            t = t - 1
+                        x = img - x_times + x_times_sub_1
+                img = x
+                t = t - 1
+                if first_noisification:
+                    x_t_minus_1 = img
+                    first_noisification = False
 
         #img = img - noise
 
-        return xt, direct_recons, img
+        return xt, direct_recons, img, x_t_minus_1
 
     @torch.no_grad()
     def opt(self, img, t=None):

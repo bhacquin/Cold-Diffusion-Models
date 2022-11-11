@@ -1,46 +1,51 @@
 defaults:
   - base_trainer
 
-name: remixing_diffusion
+name: gaussian_diffusion
 platform: local
 
 log_level: INFO
-results_folder: /mnt/scitas/bastien/${trainer.results_dir}/${trainer.name}_${dataset.name}
-checkpointpath: # models_pt/model.pt
-seed: 42
+results_folder: /mnt/scitas/bastien/results
+checkpointpath: /mnt/scitas/bastien/Gaussian/model_200000.pt
 #### Tracker
 use_clearml: false 
 use_wandb: true
 wandb_entity: bastienvd
-ml_exp_name: Face_to_Face
+ml_exp_name: Diffusion_Gaussian
 
 
 #### Trainer params
 ema_decay: 0.995
 image_size: 128
-train_batch_size: 4
-lr: 3e-5
+train_batch_size: 64
+lr: 2e-5
 train_num_steps: 700000
 gradient_accumulate_every: 1
 fp16: false
 step_start_ema: 2000
 update_ema_every: 10
 save_and_sample_every: 1000
-recover_dominant: true
-use_epsilon_estimate: false
-use_v_prediction: false
-use_random_noise: false
+
+#### Generation
+gen_only: false 
+# noise: 
+#   type: blur
+#   kernel_std: 0.15
+#   kernel_size: 3
+#   blur_routine: Incremental    
+
 
 #### Diffusion params
 diffusion:
-  type: demix
+  type: gaussian
   device_of_kernel: cuda
   image_size: 128
   channels: 3
-  timesteps: 1000   # number of steps
+  timesteps: 300   # number of steps
   loss_type: l1
   # kernel_std: 0.15
-  # kernel_size: 3           
+  # kernel_size: 3
+  # blur_routine: Incremental             
   train_routine: Final
   sampling_routine: x0_step_down
   discrete: false
@@ -49,14 +54,11 @@ diffusion:
 model:
   residual: false
   with_time_emb: false
-  dim_mults: [1, 2, 4, 8, 8]
-  dim: 128
+  dim_mults: [1, 2, 4, 8]
+  dim: 64
   out_dim: 
   channels: 3
 
-gen_only: false
-noise:
-  max_weight: 0.3  
 
 # Mode slurm
 slurm:

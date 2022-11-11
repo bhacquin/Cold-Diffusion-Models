@@ -1,0 +1,84 @@
+defaults:
+  - base_generator
+
+name: Blur_diffusion_gaussian_noise
+platform: local
+
+log_level: INFO
+results_folder: /mnt/scitas/bastien/results/Generated
+checkpointpath: /mnt/scitas/bastien/results/Blur/model_400000.pt #/mnt/scitas/bastien/results/Gaussian/model_200000.pt #/mnt/scitas/bastien/results/Blur/model_400000.pt
+#### Tracker
+use_clearml: false 
+use_wandb: true
+wandb_entity: bastienvd
+ml_exp_name: Blur_diffusion_gaussian_noise_naive
+
+
+#### Trainer params
+# ema_decay: 0.995
+# image_size: 128
+batch_size: 32
+desired_gpu: 3
+# lr: 2e-5
+# train_num_steps: 700000
+# gradient_accumulate_every: 1
+fp16: false
+# step_start_ema: 2000
+# update_ema_every: 10
+# save_and_sample_every: 1000
+
+#### Generation
+noise: 
+  type: gaussian #deblur # 'gaussian'
+  sample_step: 0.3
+  timesteps: 300
+model:
+  sample_step: 0.15
+  sampling_routine: default #classic #x0_step_down #ddim #default
+  add_gaussian: false
+  train_routine: Final
+  discrete: false
+  number_of_loop: 1
+  timesteps: 1000
+  
+  # kernel_std: 0.15
+  # kernel_size: 3
+  # blur_routine: Incremental    
+
+
+#### Diffusion params
+# diffusion:
+#   type: denoise
+#   device_of_kernel: cuda
+#   image_size: 128
+#   channels: 3
+#   timesteps: 300   # number of steps
+#   loss_type: l1
+  # kernel_std: 0.15
+  # kernel_size: 3
+  # blur_routine: Incremental             
+  # train_routine: Final
+  # sampling_routine: x0_step_down
+  
+
+#### Model params
+# model:
+#   residual: false
+#   with_time_emb: false
+#   dim_mults: [1, 2, 4, 8]
+#   dim: 64
+#   out_dim: 
+#   channels: 3
+
+
+# Mode slurm
+slurm:
+  nodes: 1 # 2
+  gpus_per_node: 1  # max 2
+  cpus_per_task: 10
+  mem: 0 # in GiB 48
+  timeout: 1 # hours
+  partition: gpu
+  qos: gpu
+  account: vita # optional
+  reservation:

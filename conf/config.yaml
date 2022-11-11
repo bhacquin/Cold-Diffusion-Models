@@ -1,6 +1,7 @@
 defaults:
   - dataset: base_dataset
   - trainer: base_trainer
+  - generator: base_generator
   # - override hydra/job_logging: custom
   # - override hydra/help: clearaudio_help
   - _self_

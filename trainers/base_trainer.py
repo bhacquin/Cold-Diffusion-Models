@@ -129,7 +129,7 @@ class BaseTrainer(object):
             if self.cfg.trainer.use_clearml:
                 task = Task.init(project_name="Diffusion", task_name=self.cfg.trainer.ml_exp_name)
             if self.cfg.trainer.use_wandb:
-                wandb.init(project="Diffusion",entity=self.cfg.trainer.wandb_entity, sync_tensorboard=True)
+                wandb.init(project="Diffusion",entity=self.cfg.trainer.wandb_entity, sync_tensorboard=True, dir = self.cfg.trainer.results_folder)
                 wandb.run.name = self.cfg.trainer.ml_exp_name
                 # wandb.run.save()
             self.writer = SummaryWriter()
@@ -160,6 +160,11 @@ class BaseTrainer(object):
         self.setup_trainer()
         self.run()
 
+    def setup(self) -> None:
+        self.setup_platform()
+        self.setup_tracker()
+        self.setup_trainer()
+        
     def setup_slurm(self) -> None:
         # torchaudio.set_audio_backend("soundfile")
         # torchaudio.set_audio_backend("sox_io")

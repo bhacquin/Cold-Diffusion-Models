@@ -48,4 +48,7 @@ check = ['isort', 'black']
 deblur-local = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m train dataset=dataset_celebA128 trainer=trainer_blur"
 defade-local = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m train dataset=dataset_celebA128 trainer=trainer_defading"
 demix-local = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m train dataset=dataset_remixing_local trainer=trainer_remixing_local"
+denoise-local = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m train dataset=dataset_celebA128 trainer=trainer_denoise"
 deblur-scitas = "python -m train dataset=dataset_celebA128_scitas trainer=trainer_blur_scitas hydra.job.chdir=True"
+generate-blur = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m generate dataset=dataset_celebA128 trainer=trainer_blur generator=generator"
+generate-gaussian = "torchrun --standalone --nnodes=1 --nproc_per_node=4 -m generate dataset=dataset_celebA128 trainer=trainer_denoise generator=generator"
